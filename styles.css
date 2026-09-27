@@ -59,7 +59,7 @@ main { max-width: 600px; margin: 0 auto; padding: 4px 16px calc(var(--tabh) + 11
 .empty { color: var(--faint); text-align: center; padding: 18px 8px; }
 .empty.small { padding: 8px; text-align: left; font-size: 14px; }
 
-.btn { white-space: nowrap; background: var(--accent); color: var(--accent-ink); font-weight: 600; padding: 12px 18px; border-radius: 12px; text-align: center; }
+.btn { text-decoration: none; display: inline-block; white-space: nowrap; background: var(--accent); color: var(--accent-ink); font-weight: 600; padding: 12px 18px; border-radius: 12px; text-align: center; }
 .btn.small { padding: 8px 14px; font-size: 14px; border-radius: 10px; }
 .btn.ghost { background: var(--surface2); color: var(--text); }
 .btn.danger { color: var(--danger); }

@@ -29,7 +29,7 @@ export default {
     if (feed && req.method === 'GET') {
       const ics = await env.KV.get('f:' + feed[1]);
       if (!ics) return new Response('Not found', { status: 404 });
-      return new Response(ics, { headers: { 'Content-Type': 'text/calendar; charset=utf-8', 'Cache-Control': 'no-cache, max-age=0' } });
+      return new Response(ics, { headers: { ...CORS, 'Content-Type': 'text/calendar; charset=utf-8', 'Cache-Control': 'no-cache, max-age=0' } });
     }
     if (url.pathname === '/') return new Response('After Hours calendar bridge is running.');
 
@@ -137,6 +137,23 @@ function parseDuration(v) {
   return (m[1] === '-' ? -1 : 1) * (((+m[2] || 0) * 7 + (+m[3] || 0)) * DAY + (+m[4] || 0) * 36e5 + (+m[5] || 0) * 6e4 + (+m[6] || 0) * 1e3);
 }
 
+// Days of month m matching BYDAY (e.g. 2MO, -1FR, TU) or BYMONTHDAY, else the start date's day
+function monthDays(y, m, base, r, byday) {
+  const n = dim(y, m);
+  let ds = [];
+  if (byday) {
+    byday.forEach(x => {
+      const mm = x.match(/^([+-]?\d+)?(SU|MO|TU|WE|TH|FR|SA)$/);
+      if (!mm) return;
+      const all = [];
+      for (let d = 1; d <= n; d++) if (new Date(Date.UTC(y, m - 1, d)).getUTCDay() === WD.indexOf(mm[2])) all.push(d);
+      if (mm[1]) { const i = +mm[1], v = i > 0 ? all[i - 1] : all[all.length + i]; if (v) ds.push(v); } else ds.push(...all);
+    });
+  } else if (r.BYMONTHDAY) ds = r.BYMONTHDAY.split(',').map(Number).map(x => (x < 0 ? n + 1 + x : x)).filter(x => x >= 1 && x <= n);
+  else if (base.d <= n) ds = [base.d];
+  return [...new Set(ds)].sort((a, b) => a - b);
+}
+
 function* candidates(base, r) {
   const I = Math.max(1, +r.INTERVAL || 1), byday = r.BYDAY ? r.BYDAY.split(',') : null;
   if (r.FREQ === 'DAILY') { for (let k = 0; k < 20000; k++) yield addDaysW(base, k * I); }
@@ -146,22 +163,16 @@ function* candidates(base, r) {
     for (let k = 0; k < 5000; k++) for (const d of days) yield addDaysW(ws, k * 7 * I + d);
   } else if (r.FREQ === 'MONTHLY') {
     for (let k = 0; k < 2000; k++) {
-      const mi = base.m - 1 + k * I, y = base.y + Math.floor(mi / 12), m = (mi % 12) + 1, n = dim(y, m);
-      let ds = [];
-      if (byday) {
-        byday.forEach(x => {
-          const mm = x.match(/^([+-]?\d+)?(SU|MO|TU|WE|TH|FR|SA)$/);
-          if (!mm) return;
-          const all = [];
-          for (let d = 1; d <= n; d++) if (new Date(Date.UTC(y, m - 1, d)).getUTCDay() === WD.indexOf(mm[2])) all.push(d);
-          if (mm[1]) { const i = +mm[1], v = i > 0 ? all[i - 1] : all[all.length + i]; if (v) ds.push(v); } else ds.push(...all);
-        });
-      } else if (r.BYMONTHDAY) ds = r.BYMONTHDAY.split(',').map(Number).map(x => (x < 0 ? n + 1 + x : x)).filter(x => x >= 1 && x <= n);
-      else if (base.d <= n) ds = [base.d];
-      for (const d of [...new Set(ds)].sort((a, b) => a - b)) yield { ...base, y, m, d };
+      const mi = base.m - 1 + k * I, y = base.y + Math.floor(mi / 12), m = (mi % 12) + 1;
+      for (const d of monthDays(y, m, base, r, byday)) yield { ...base, y, m, d };
     }
   } else if (r.FREQ === 'YEARLY') {
-    for (let k = 0; k < 200; k++) { const y = base.y + k * I; if (base.d <= dim(y, base.m)) yield { ...base, y }; }
+    // e.g. FREQ=YEARLY;BYMONTH=11;BYDAY=1SU (first Sunday of November)
+    const months = r.BYMONTH ? r.BYMONTH.split(',').map(Number).sort((a, b) => a - b) : [base.m];
+    for (let k = 0; k < 200; k++) {
+      const y = base.y + k * I;
+      for (const m of months) for (const d of monthDays(y, m, base, r, byday)) yield { ...base, y, m, d };
+    }
   }
 }
 

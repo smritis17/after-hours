@@ -2,7 +2,7 @@
 
 /* ---------- Config ---------- */
 // Cloudflare Worker that bridges to Apple Calendar (see sync-worker/). Empty = calendar sync unavailable.
-const SYNC_URL = '';
+const SYNC_URL = 'https://after-hours-sync.after-hours-sync.workers.dev';
 
 /* ---------- Utilities ---------- */
 const KEY = 'afterhours.v1';
