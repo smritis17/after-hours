@@ -15,7 +15,7 @@ It opens full-screen like a native app and works offline.
 |---|---|
 | **Tonight** | Opens to tonight's plan (with your Apple Calendar events), follow-ups due, Top 3, a focus timer and what's next. A *Low energy tonight* toggle shows only light/admin tasks. |
 | **Projects** | Each area has its own stages. The startup goes Prototype → Mentor feedback → Trial planning → Trials → Regulatory → Launch. Tap an area for a scrolling list (what's left per project) or a board. Each area also has a **People** tracker for mentors and contacts, with follow-up dates. |
-| **Ideas** | One-tap capture for any idea, with an optional link. Sort ideas into an area, star them, or turn them into a project or task. |
+| **Studio** | *Ideas*: one-tap capture for any idea, to sort, star, or turn into a project or task later. *Fabric closet*: a photo gallery of your fabrics with fiber, amount, status (In stash / Planned / Used up) and what you want to make with each. Link a fabric to a project and it shows up there. Photos are stored on your phone and included in backups. |
 | **Week** | Evening time blocks (6–10pm by default) alongside your Apple Calendar. Mark days **Away**; trips are detected automatically. *Plan evenings* suggests whole nights per area from your weekly hour targets and skips busy or away evenings. |
 | **Review** | A 10-minute Sunday check-in (or Monday if you're away on Sunday): hours vs. target, wins, stalled projects, follow-ups, reflection, then plan next week. |
 

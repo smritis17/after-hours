@@ -1,6 +1,6 @@
 // Offline support: serve the app from cache instantly, refresh the cache in the background.
 // Bump CACHE on every deploy so phones pick up the new version.
-const CACHE = 'afterhours-v3';
+const CACHE = 'afterhours-v4';
 const ASSETS = ['./', './index.html', './styles.css', './app.js', './manifest.webmanifest',
   './icons/icon-192.png', './icons/icon-512.png', './icons/apple-touch-icon.png'];
 

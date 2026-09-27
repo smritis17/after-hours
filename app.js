@@ -68,6 +68,7 @@ const STAGES = {
   startup: ['Prototype', 'Mentor feedback', 'Trial planning', 'Trials', 'Regulatory', 'Launch'],
   side: ['In progress', 'Next up', 'Someday', 'Paused', 'Done'],
 };
+const FABRIC_STATUS = ['In stash', 'Planned', 'Used up'];
 const PEOPLE_STATUS = ['To contact', 'Reached out', 'Meeting set', 'Follow up', 'Engaged', 'Not now'];
 const CLOSED_STATUS = ['Engaged', 'Not now'];
 
@@ -81,7 +82,7 @@ function defaultState() {
       { id: 'startup', name: 'Startup', color: '#7cc4ff', target: 8, stages: STAGES.startup.slice() },
       { id: 'side', name: 'Side Projects', color: '#8fe0b0', target: 2, stages: STAGES.side.slice(), pipe: false },
     ],
-    projects: [], tasks: [], blocks: [], sessions: [], people: [], ideas: [],
+    projects: [], tasks: [], blocks: [], sessions: [], people: [], ideas: [], fabrics: [],
     top3: {}, reviews: {}, away: {}, timer: null, lowEnergy: null, flags: {},
     sync: null, cal: { events: [], errors: [], fetchedAt: 0 },
   };
@@ -110,7 +111,7 @@ function migrate(d) {
     });
     d.version = 2;
   }
-  ['people', 'ideas'].forEach(k => { if (!Array.isArray(d[k])) d[k] = []; });
+  ['people', 'ideas', 'fabrics'].forEach(k => { if (!Array.isArray(d[k])) d[k] = []; });
   ['away', 'flags', 'top3', 'reviews'].forEach(k => { if (!d[k] || typeof d[k] !== 'object') d[k] = {}; });
   if (!d.cal || !Array.isArray(d.cal.events)) d.cal = def.cal;
   return d;
@@ -120,9 +121,9 @@ function load() {
   return defaultState();
 }
 let S = load();
-const UI = { view: 'tonight', area: 'all', ideaArea: 'all', weekOffset: 0, reviewOffset: 0, sheetRefresh: null, projMode: 'list' };
+const UI = { view: 'tonight', area: 'all', ideaArea: 'all', weekOffset: 0, reviewOffset: 0, sheetRefresh: null, projMode: 'list', studio: 'ideas', fabricFilter: 'all', fabricQuery: '' };
 try { Object.assign(UI, JSON.parse(localStorage.getItem(UI_KEY) || '{}')); } catch (e) { /* ignore */ }
-const saveUI = () => { try { localStorage.setItem(UI_KEY, JSON.stringify({ projMode: UI.projMode })); } catch (e) { /* ignore */ } };
+const saveUI = () => { try { localStorage.setItem(UI_KEY, JSON.stringify({ projMode: UI.projMode, studio: UI.studio })); } catch (e) { /* ignore */ } };
 
 function save() {
   try { localStorage.setItem(KEY, JSON.stringify(S)); }
@@ -199,9 +200,7 @@ function calEventLine(e) {
 function taskRow(t, { showProject = true, num } = {}) {
   const p = project(t.projectId), a = area(t.areaId), today = todayKey();
   const running = S.timer && S.timer.taskId === t.id;
-  const bits = [esc(showProject && p ? p.name : (a ? a.name : ''))];
-  if (t.est) bits.push(fmtDur(t.est));
-  if (isLight(t) && !t.done) bits.push('light');
+  const bits = [esc(showProject && p ? p.name : (a ? a.name : ''))].filter(Boolean);
   if (t.due) bits.push(`<span class="${!t.done && t.due < today ? 'overdue' : ''}">${fmtDay(t.due)}</span>`);
   return `<div class="task ${t.done ? 'done' : ''}">
     ${num ? `<span class="num">${num}</span>` : ''}
@@ -269,19 +268,12 @@ function personRow(p) {
 }
 
 function timerCard() {
-  if (S.timer) {
-    const t = task(S.timer.taskId), a = area(S.timer.areaId), p = project(S.timer.projectId);
-    return `<div class="card timer on" style="--c:${a ? a.color : 'var(--accent)'}">
-      <div><div class="eyebrow">Focusing on</div>
-        <div class="timer-title">${esc((t && t.title) || (p && p.name) || (a && a.name) || 'Focus')}</div>
-        <div class="meta">${esc([a && a.name, t && p ? p.name : ''].filter(Boolean).join(' · '))}</div></div>
-      <div class="timer-right"><div class="elapsed" data-elapsed>${fmtClock(Date.now() - S.timer.start)}</div>
-        <button class="btn small" data-a="stop-timer">Stop &amp; log</button></div>
-    </div>`;
-  }
-  return `<div class="card timer">
-    <div><div class="timer-title">Focus timer</div><div class="meta">Logs your hours to each area</div></div>
-    <div class="row gap"><button class="btn ghost small" data-a="log-time">Log time</button><button class="btn small" data-a="pick-focus">Start</button></div>
+  const t = task(S.timer.taskId), a = area(S.timer.areaId), p = project(S.timer.projectId);
+  return `<div class="timer" style="--c:${a ? a.color : 'var(--accent)'}">
+    <span class="timer-dot"></span>
+    <div class="timer-main"><div class="timer-title">${esc((t && t.title) || (p && p.name) || (a && a.name) || 'Focus')}</div>
+      <div class="elapsed" data-elapsed>${fmtClock(Date.now() - S.timer.start)}</div></div>
+    <button class="btn small" data-a="stop-timer">Stop</button>
   </div>`;
 }
 
@@ -315,68 +307,60 @@ function viewTonight() {
   const now = new Date(), k = todayKey(), s = S.settings;
   const work = isWorkDay(now), nowMin = now.getHours() * 60 + now.getMinutes();
   const es = toMin(s.eveningStart), ee = toMin(s.eveningEnd), away = isAway(k);
-  let sub;
-  if (away) sub = `You're away${awayReason(k) && awayReason(k) !== 'Marked away' ? ` (${esc(awayReason(k))})` : ''}. Enjoy it, the plan can wait ✈️`;
-  else if (!work) sub = 'Weekend. Bonus time only, no pressure.';
-  else if (nowMin < es) sub = `Your evening starts at ${fmtTime(s.eveningStart)}, ${fmtDur(es - nowMin)} from now`;
-  else if (nowMin < ee) sub = `${fmtDur(ee - nowMin)} left tonight`;
-  else sub = "Tonight's done. Rest up ✦";
+  const blocks = S.blocks.filter(b => b.date === k).sort((a, b) => a.start.localeCompare(b.start));
+  const evs = calEvents(k).filter(e => !e.allDay);
 
-  let h = `<p class="sub">${sub}</p>`;
+  // One line that says what tonight is
+  let line;
+  if (away) line = `You're away today. Enjoy it ✈️`;
+  else if (blocks.length) {
+    const names = [...new Set(blocks.map(b => { const p = project(b.projectId), a = area(b.areaId); return b.title || (p && p.name) || (a && a.name); }))];
+    line = `${fmtTime(blocks[0].start)}–${fmtTime(blocks[blocks.length - 1].end)} · ${esc(names.join(', then '))}`;
+  } else if (work) line = 'Nothing planned tonight';
+  else line = 'Weekend. No plan, no pressure';
+  if (work && !away && nowMin >= es && nowMin < ee) line += ` · ${fmtDur(ee - nowMin)} left`;
+
+  let h = `<button class="tonight-line" data-a="${blocks.length ? 'edit-block' : 'tab'}" data-id="${blocks[0] ? blocks[0].id : ''}" data-v="week">${line}</button>`;
+  if (evs.length) h += `<p class="also">Also today: ${evs.map(e => `${fmtTime(hhmm(e.s))} ${esc(e.title)}`).join(' · ')}</p>`;
+  if (!blocks.length && work && !away) {
+    h += `<div class="area-picks">${S.areas.map(a => `<button class="chip" data-a="quick-block" data-area="${a.id}"><i class="dot" style="background:${a.color}"></i>${esc(a.name)}</button>`).join('')}</div>`;
+  }
 
   if (!S.projects.length && !S.tasks.length) {
-    h += `<div class="card hero"><h2>Welcome to After Hours</h2>
-      <p class="meta" style="margin-top:-6px">Built for 9–5 days and evening work.</p>
-      <p><b>1.</b> Add your projects, or load the starter plan for your prototype and brand.<br>
-      <b>2.</b> Plan your evenings: give each weeknight to an area.<br>
-      <b>3.</b> Each evening, open <i>Tonight</i>, pick your top 3 and start the timer.</p>
-      <div class="row gap"><button class="btn small" data-a="tab" data-v="projects">Add projects</button><button class="btn ghost small" data-a="plan" data-week="${dkey(weekStart(now))}">Plan evenings</button></div></div>`;
+    h += `<div class="card hero"><h2>Welcome</h2>
+      <p>Start by adding your projects, or load a starter plan for your prototype and brand.</p>
+      <button class="btn small" data-a="tab" data-v="projects">Get started</button></div>`;
   }
 
-  // Weekly review nudge: Sunday, or catch-up early in the week (e.g. after a weekend away)
   const thisWk = dkey(weekStart(now)), lastWk = dkey(addDays(weekStart(now), -7));
-  if (now.getDay() === 0 && !S.reviews[thisWk]) {
-    h += `<button class="banner" data-a="review-week" data-o="0"><strong>It's Sunday: time for your 10-minute review →</strong><br><span class="meta">Look back at the week, then plan next week's evenings.</span></button>`;
-  } else if ([1, 2].includes(now.getDay()) && !S.reviews[lastWk] && S.sessions.length) {
-    h += `<button class="banner" data-a="review-week" data-o="-1"><strong>Catch up on last week's review →</strong><br><span class="meta">10 minutes to reset and plan this week.</span></button>`;
-  }
+  if (now.getDay() === 0 && !S.reviews[thisWk]) h += `<button class="nudge" data-a="review-week" data-o="0">Sunday review · 10 min →</button>`;
+  else if ([1, 2].includes(now.getDay()) && !S.reviews[lastWk] && S.sessions.length) h += `<button class="nudge" data-a="review-week" data-o="-1">Catch up on last week's review →</button>`;
 
-  h += timerCard();
-
-  const blocks = S.blocks.filter(b => b.date === k).sort((a, b) => a.start.localeCompare(b.start));
-  const evs = calEvents(k);
-  h += `<h3>${work ? "Tonight's plan" : "Today's plan"}</h3>`;
-  if (evs.length) h += `<div class="cal-list">${evs.map(calEventLine).join('')}</div>`;
-  if (blocks.length) h += blocks.map(blockCard).join('');
-  else if (work && !away) {
-    h += `<div class="card"><div>Nothing's planned for tonight. Give the evening to:</div><div class="area-picks">${S.areas.map(a =>
-      `<button class="chip" data-a="quick-block" data-area="${a.id}"><i class="dot" style="background:${a.color}"></i>${esc(a.name)}</button>`).join('')}</div></div>`;
-  } else h += `<div class="empty small">No blocks. Enjoy the day, or <button class="link" data-a="new-block" data-date="${k}">add a bonus block</button>.</div>`;
-
-  const fu = dueFollowUps();
-  if (fu.length) h += `<h3>Follow-ups due</h3><div class="card">${fu.map(personRow).join('')}</div>`;
+  if (S.timer) h += timerCard();
 
   const top = (S.top3[k] || []).map(task).filter(Boolean);
-  h += `<h3>Top 3</h3><div class="card top3">`;
-  if (top.length) h += top.map((t, i) => taskRow(t, { num: i + 1 })).join('');
-  else {
+  h += `<h3>Top 3</h3><div class="list">`;
+  h += top.map((t, i) => taskRow(t, { num: i + 1 })).join('');
+  if (!top.length) {
     const carry = carryOver();
-    h += `<div class="empty small">What are the three things that would make tonight a win?</div>`;
-    if (carry.length) h += `<button class="add-line" data-a="carry">↻ Carry over ${carry.length} unfinished from ${fmtDay(carry.key).toLowerCase()}</button><br>`;
+    h += carry.length ? `<button class="add-line" data-a="carry">↻ Carry over ${carry.length} from ${fmtDay(carry.key).toLowerCase()}</button>` : '';
   }
-  if (top.length < 3) h += `<button class="add-line" data-a="pick-top3">+ Pick top 3</button>`;
+  if (top.length < 3) h += `<button class="add-line" data-a="pick-top3">+ Choose ${top.length ? 'another' : "tonight's top 3"}</button>`;
   h += `</div>`;
+
+  const fu = dueFollowUps();
+  if (fu.length) h += `<h3>Follow up</h3><div class="list">${fu.map(personRow).join('')}</div>`;
 
   const low = S.lowEnergy === k;
   const blockAreas = new Set(blocks.map(b => b.areaId)), blockProjects = new Set(blocks.map(b => b.projectId).filter(Boolean));
   const topIds = new Set(S.top3[k] || []);
-  const next = openTasks().filter(t => !topIds.has(t.id) && (low ? isLight(t) : !blockAreas.size || blockAreas.has(t.areaId)))
-    .sort((a, b) => (blockProjects.has(b.projectId) - blockProjects.has(a.projectId)) || taskSort(a, b)).slice(0, low ? 10 : 6);
-  h += `<div class="row between" style="margin-top:22px"><h3 style="margin:0">${low ? 'Light tasks' : `Up next${blockAreas.size ? ' for tonight' : ''}`}</h3>
-    <button class="chip small ${low ? 'on' : ''}" data-a="low-energy">🔋 Low energy tonight</button></div>`;
-  if (low) h += `<p class="meta" style="margin:6px 2px 0">Short admin tasks from every area. Small wins still count.</p>`;
-  h += next.length ? `<div class="card">${next.map(t => taskRow(t)).join('')}</div>`
-    : `<div class="empty small">${low ? 'No light tasks yet. Mark a task "Light / admin", or give it 30 minutes or less.' : 'No open tasks here. Tap + to add one.'}</div>`;
+  const all = openTasks().filter(t => !topIds.has(t.id) && (low ? isLight(t) : !blockAreas.size || blockAreas.has(t.areaId)))
+    .sort((a, b) => (blockProjects.has(b.projectId) - blockProjects.has(a.projectId)) || taskSort(a, b));
+  const shown = UI.moreNext ? all.slice(0, 15) : all.slice(0, 4);
+  h += `<div class="row between"><h3>${low ? 'Light tasks' : 'Up next'}</h3><button class="toggle ${low ? 'on' : ''}" data-a="low-energy">${low ? '🔋 Low energy on' : '🔋 Low energy'}</button></div>`;
+  h += shown.length ? `<div class="list">${shown.map(t => taskRow(t)).join('')}${all.length > shown.length ? `<button class="add-line muted" data-a="more-next">Show ${all.length - shown.length} more</button>` : ''}</div>`
+    : `<p class="empty small">${low ? 'Nothing light yet. Mark a task "Light / admin", or give it 30 minutes or less.' : 'All clear. Tap + to add a task.'}</p>`;
+  h += `<p class="foot"><button class="link muted" data-a="log-time">Forgot the timer? Log time</button></p>`;
   return h;
 }
 
@@ -400,30 +384,25 @@ function viewProjects() {
 
   if (UI.area === 'all') {
     if (!S.flags.starter && !S.flags.starterDismissed) {
-      h += `<div class="card hero"><div class="eyebrow">Starter plan</div>
-        <p style="margin:6px 0 10px">Add ready-made projects and tasks for <b>finishing your prototype</b>, <b>mentor outreach</b>, <b>trial planning</b>, and your brand's <b>foundation, first pieces and marketing</b>. You can edit or delete anything.</p>
-        <div class="row gap"><button class="btn small" data-a="starter">Add starter plan</button><button class="btn ghost small" data-a="starter-dismiss">No thanks</button></div></div>`;
+      h += `<div class="starter"><span>✨ Want a starter plan for your prototype and brand?</span>
+        <span class="row gap"><button class="link" data-a="starter">Add it</button><button class="link muted" data-a="starter-dismiss">No thanks</button></span></div>`;
     }
-    h += S.areas.map(a => {
-      const ps = S.projects.filter(p => p.areaId === a.id).sort((x, y) => a.stages.indexOf(x.stage) - a.stages.indexOf(y.stage));
-      const loose = S.tasks.filter(t => t.areaId === a.id && !t.projectId && !t.done).length;
-      const ppl = S.people.filter(p => p.areaId === a.id), due = ppl.filter(p => p.next && p.next <= todayKey() && !CLOSED_STATUS.includes(p.status)).length;
-      const extra = [loose ? `${loose} general task${loose > 1 ? 's' : ''}` : '', ppl.length ? `${ppl.length} ${ppl.length > 1 ? 'people' : 'person'}${due ? ` (${due} to follow up)` : ''}` : ''].filter(Boolean).join(' · ');
-      return `<section class="area-sec">
-        <div class="sec-head"><button class="sec-title" data-a="filter" data-id="${a.id}"><i class="dot" style="background:${a.color}"></i>${esc(a.name)} ›</button>
-          <span class="meta">${fmtDur(logged[a.id] || 0)} / ${a.target || 0}h this week</span></div>
-        ${ps.length ? ps.map(projectCard).join('') : '<div class="empty small">No projects yet</div>'}
-        ${extra ? `<button class="meta" data-a="filter" data-id="${a.id}" style="padding:4px 2px">${extra} ›</button><br>` : ''}
-        <button class="add-line" data-a="new-project" data-area="${a.id}">+ New project</button>
-      </section>`;
-    }).join('');
+    h += `<div class="list areas">${S.areas.map(a => {
+      const ps = S.projects.filter(p => p.areaId === a.id && !isFinalStage(p));
+      const open = S.tasks.filter(t => t.areaId === a.id && !t.done);
+      const next = open.sort(taskSort)[0];
+      return `<button class="area-row" data-a="filter" data-id="${a.id}">
+        <i class="dot big" style="background:${a.color}"></i>
+        <span class="area-main"><span class="area-name">${esc(a.name)}</span>
+          <span class="meta">${ps.length ? `${ps.length} active project${ps.length > 1 ? 's' : ''}` : 'No projects yet'}${next ? ` · next: ${esc(next.title)}` : ''}</span></span>
+        <span class="chev">›</span></button>`;
+    }).join('')}</div>`;
     return h;
   }
 
   const a = area(UI.area);
-  h += `<div class="row between" style="margin:6px 0 4px">
-    <div class="seg mini">${['list', 'board'].map(m => `<button class="${UI.projMode === m ? 'on' : ''}" data-a="proj-mode" data-m="${m}">${m === 'list' ? 'List' : 'Board'}</button>`).join('')}</div>
-    <span class="meta">${fmtDur(logged[a.id] || 0)} of ${a.target || 0}h this week</span></div>`;
+  h += `<div class="row between" style="margin:2px 0 4px"><span class="meta">${fmtDur(logged[a.id] || 0)} of ${a.target || 0}h this week</span>
+    <div class="seg mini">${['list', 'board'].map(m => `<button class="${UI.projMode === m ? 'on' : ''}" data-a="proj-mode" data-m="${m}">${m === 'list' ? 'List' : 'Board'}</button>`).join('')}</div></div>`;
 
   if (UI.projMode === 'board') {
     h += `<div class="meta" style="margin:6px 2px">Swipe across the stages →</div><div class="board">${a.stages.map((st, i) => {
@@ -443,14 +422,54 @@ function viewProjects() {
   }
   h += `<button class="add-line" data-a="new-project" data-area="${a.id}">+ New project</button>`;
 
-  const loose = S.tasks.filter(t => t.areaId === a.id && !t.projectId).sort((x, y) => x.done - y.done || taskSort(x, y));
-  h += `<h3>General ${esc(a.name)} tasks</h3><div class="card">${loose.map(t => taskRow(t)).join('') || '<div class="empty small">None yet</div>'}
-    <button class="add-line" data-a="new-task" data-area="${a.id}">+ Add task</button></div>`;
+  const loose = S.tasks.filter(t => t.areaId === a.id && !t.projectId && !t.done).sort(taskSort);
+  if (loose.length) h += `<h3>Other tasks</h3><div class="list">${loose.map(t => taskRow(t)).join('')}</div>`;
 
   const ppl = S.people.filter(p => p.areaId === a.id)
     .sort((x, y) => CLOSED_STATUS.includes(x.status) - CLOSED_STATUS.includes(y.status) || (x.next || '9999').localeCompare(y.next || '9999'));
-  h += `<h3>People${a.id === 'startup' ? ': mentors &amp; contacts' : ''}</h3><div class="card">${ppl.map(personRow).join('') || `<div class="empty small">${a.id === 'startup' ? 'Add mentors, clinicians and advisors here to track outreach and follow-ups.' : 'Suppliers, collaborators, contacts…'}</div>`}
-    <button class="add-line" data-a="new-person" data-area="${a.id}">+ Add person</button></div>`;
+  if (ppl.length || a.id === 'startup') {
+    h += `<h3>${a.id === 'startup' ? 'Mentors &amp; contacts' : 'People'}</h3><div class="list">${ppl.map(personRow).join('') || '<p class="empty small">Track who you\'ve reached out to and when to follow up.</p>'}
+      <button class="add-line" data-a="new-person" data-area="${a.id}">+ Add person</button></div>`;
+  }
+  h += `<div class="foot row gap">${loose.length ? '' : `<button class="link muted" data-a="new-task" data-area="${a.id}">+ Task without a project</button>`}${ppl.length || a.id === 'startup' ? '' : `<button class="link muted" data-a="new-person" data-area="${a.id}">+ Person</button>`}</div>`;
+  return h;
+}
+
+function viewStudio() {
+  const tog = `<div class="seg studio-seg">${[['ideas', '💡 Ideas'], ['fabrics', '🧵 Fabric closet']].map(([m, l]) => `<button class="${UI.studio === m ? 'on' : ''}" data-a="studio" data-m="${m}">${l}</button>`).join('')}</div>`;
+  return tog + (UI.studio === 'fabrics' ? viewFabrics() : viewIdeas());
+}
+
+const fabric = id => S.fabrics.find(f => f.id === id);
+function fabricMatches(f) {
+  if (UI.fabricFilter !== 'all' && f.status !== UI.fabricFilter) return false;
+  const q = UI.fabricQuery.trim().toLowerCase();
+  if (!q) return true;
+  const p = project(f.projectId);
+  return [f.name, f.fiber, f.color, f.amount, f.source, f.plans, p && p.name].join(' ').toLowerCase().includes(q);
+}
+function fabricCard(f) {
+  const img = f.photos && f.photos[0], plan = (f.plans || '').split('\n')[0], p = project(f.projectId);
+  const st = f.status === 'Planned' ? 'planned' : f.status === 'Used up' ? 'used' : '';
+  return `<button class="fabric ${st}" data-a="edit-fabric" data-id="${f.id}">
+    <span class="swatch">${img ? `<img data-img="thumb:${img}" alt="">` : '<span class="no-photo">🧵</span>'}${st ? `<i class="st st-${st}">${esc(f.status)}</i>` : ''}</span>
+    <span class="fabric-name">${esc(f.name || 'Untitled fabric')}</span>
+    <span class="meta">${esc([f.amount, f.fiber].filter(Boolean).join(' · ') || f.color || '')}</span>
+    ${plan || p ? `<span class="fabric-plan">→ ${esc(plan || p.name)}</span>` : ''}
+  </button>`;
+}
+function fabricGrid() {
+  const list = S.fabrics.filter(fabricMatches).sort((a, b) => (a.status === 'Used up') - (b.status === 'Used up') || b.created - a.created);
+  if (!S.fabrics.length) return `<div class="empty">Your fabric closet is empty. Tap <b>+ Add fabric</b> and snap a photo of each fabric you own.</div>`;
+  return list.length ? `<div class="fab-grid">${list.map(fabricCard).join('')}</div>` : `<div class="empty">No fabrics match.</div>`;
+}
+function viewFabrics() {
+  const n = s => S.fabrics.filter(f => f.status === s).length;
+  let h = `<div class="row between" style="margin:10px 0 4px"><span class="meta">${S.fabrics.length} fabric${S.fabrics.length === 1 ? '' : 's'}${n('Planned') ? ` · ${n('Planned')} planned` : ''}</span>
+    <button class="btn small" data-a="new-fabric">+ Add fabric</button></div>`;
+  if (S.fabrics.length > 3) h += `<input class="search" id="fabric-search" type="search" placeholder="Search: linen, silk, trousers…" value="${esc(UI.fabricQuery)}">`;
+  h += `<div class="chips">${['all', ...FABRIC_STATUS].map(x => `<button class="chip ${UI.fabricFilter === x ? 'on' : ''}" data-a="fabric-filter" data-id="${x}">${x === 'all' ? 'All' : x}</button>`).join('')}</div>`;
+  h += `<div id="fabric-grid">${fabricGrid()}</div>`;
   return h;
 }
 
@@ -458,11 +477,11 @@ function viewIdeas() {
   if (UI.ideaArea !== 'all' && UI.ideaArea !== 'none' && !area(UI.ideaArea)) UI.ideaArea = 'all';
   const list = S.ideas.filter(i => UI.ideaArea === 'all' || (UI.ideaArea === 'none' ? !area(i.areaId) : i.areaId === UI.ideaArea))
     .sort((a, b) => (b.starred ? 1 : 0) - (a.starred ? 1 : 0) || b.created - a.created);
-  let h = `<form class="card capture" data-form="idea">
+  let h = `<form class="capture" data-form="idea">
     <textarea name="text" placeholder="Capture an idea: a design, a feature, a new side project…" required rows="2"></textarea>
-    <div class="row gap" style="margin-top:8px"><select name="areaId">${areaOptions('', { blank: 'Unsorted' })}</select>
+    <div class="row gap" style="margin-top:8px"><select name="areaId">${areaOptions('', { blank: 'No area yet' })}</select>
     <button class="btn small">Save</button></div>
-    <input name="link" type="url" placeholder="Link (optional)" style="margin-top:8px">
+    <details class="more"><summary>Add a link</summary><input name="link" type="url" placeholder="https://…"></details>
   </form>`;
   h += `<div class="chips">${chip('all', 'All', null, 'idea-filter', UI.ideaArea)}${S.areas.map(a => chip(a.id, a.name, a.color, 'idea-filter', UI.ideaArea)).join('')}${chip('none', 'Unsorted', null, 'idea-filter', UI.ideaArea)}</div>`;
   h += list.length ? list.map(i => {
@@ -475,28 +494,29 @@ function viewIdeas() {
 }
 
 function viewWeek() {
-  const ws = addDays(weekStart(new Date()), UI.weekOffset * 7), today = todayKey(), s = S.settings;
-  const planned = plannedByArea(ws);
+  const ws = addDays(weekStart(new Date()), UI.weekOffset * 7), today = todayKey();
+  const label = UI.weekOffset === 0 ? 'This week' : UI.weekOffset === 1 ? 'Next week' : UI.weekOffset === -1 ? 'Last week' : '';
   let h = `<div class="weeknav"><button class="arrow" data-a="week" data-d="-1" aria-label="Previous week">‹</button>
-    <div style="text-align:center"><strong>${fmtRange(ws)}</strong><div class="meta">${UI.weekOffset === 0 ? 'This week' : UI.weekOffset === 1 ? 'Next week' : UI.weekOffset === -1 ? 'Last week' : ''}</div></div>
-    <button class="arrow" data-a="week" data-d="1" aria-label="Next week">›</button></div>`;
-  h += `<div class="row gap"><button class="btn small" data-a="plan" data-week="${dkey(ws)}">Plan evenings</button>
-    ${S.sync ? `<span class="meta">✓ Syncing with Apple Calendar</span>` : `<button class="btn ghost small" data-a="ics-week" data-week="${dkey(ws)}">Export to calendar</button>`}</div>`;
-  h += `<div class="card">${S.areas.map(a => bar(a, planned[a.id] || 0, 0)).join('')}<div class="legend">Planned hours vs. weekly target</div></div>`;
+    <div style="text-align:center"><strong>${fmtRange(ws)}</strong>${label ? `<div class="meta">${label}</div>` : ''}</div>
+    <button class="arrow" data-a="week" data-d="1" aria-label="Next week">›</button></div>
+    <button class="btn wide" data-a="plan" data-week="${dkey(ws)}">Plan evenings</button>`;
+  const review = reviewSlot(addDays(ws, 6));
+  h += `<div class="days">`;
   for (let i = 0; i < 7; i++) {
-    const d = addDays(ws, i), k = dkey(d), work = isWorkDay(d), away = isAway(k);
+    const d = addDays(ws, i), k = dkey(d), away = isAway(k);
     const blocks = S.blocks.filter(b => b.date === k).sort((a, b) => a.start.localeCompare(b.start));
-    const review = reviewSlot(addDays(ws, 6));
-    h += `<div class="day ${k === today ? 'today' : ''} ${work ? '' : 'weekend'} ${away ? 'away' : ''}">
-      <div class="day-head"><span class="day-name">${DAYS[d.getDay()]} <span class="meta">${d.getDate()} ${MON[d.getMonth()]}</span></span>
-        <span class="row"><button class="away-btn ${away ? 'on' : ''}" data-a="toggle-away" data-date="${k}">${away ? '✈ Away' : 'Away?'}</button>
+    const evs = calEvents(k);
+    h += `<div class="day ${k === today ? 'today' : ''} ${away ? 'away' : ''}">
+      <div class="day-head"><span class="day-name">${DOW[d.getDay()]} <span class="day-num">${d.getDate()}</span></span>
+        <span class="row">${away ? `<button class="away-btn on" data-a="toggle-away" data-date="${k}">✈ Away</button>` : ''}
         <button class="add-block" data-a="new-block" data-date="${k}" aria-label="Add block">+</button></span></div>
-      ${work && !away ? `<div class="work">Work ${fmtTime(s.workStart)}–${fmtTime(s.workEnd)}</div>` : ''}
-      ${calEvents(k).map(calEventLine).join('')}
+      ${evs.map(calEventLine).join('')}
       ${blocks.map(blockCard).join('')}
-      ${review.date === k ? `<button class="review-slot" data-a="review-week" data-o="${UI.weekOffset}">🗓 ${fmtTime(review.start)} · Weekly review &amp; plan</button>` : ''}
+      ${review.date === k ? `<button class="review-slot" data-a="review-week" data-o="${UI.weekOffset}">${fmtTime(review.start)} · Weekly review</button>` : ''}
     </div>`;
   }
+  h += `</div>`;
+  if (!S.sync) h += `<p class="foot"><button class="link muted" data-a="ics-week" data-week="${dkey(ws)}">Export this week to a calendar</button></p>`;
   return h;
 }
 
@@ -524,10 +544,9 @@ function viewReview() {
     <div class="stat"><b>${fmtDur(total)}</b><span>focused</span></div>
     <div class="stat"><b>${evenings}</b><span>days worked</span></div></div>`;
 
-  h += `<h3>Time balance</h3><div class="card">${S.areas.map(a => bar(a, logged[a.id] || 0, planned[a.id] || 0)).join('')}
-    <div class="legend">Solid = hours logged · faint = hours planned · right edge = weekly target</div></div>`;
+  h += `<h3>Time balance</h3><div>${S.areas.map(a => bar(a, logged[a.id] || 0, planned[a.id] || 0)).join('')}
+    <div class="legend">Solid bar = hours logged, faint bar = planned, full width = your weekly target</div></div>`;
 
-  if (doneTasks.length) h += `<h3>Wins</h3><div class="card">${doneTasks.slice(0, 10).map(t => taskRow(t)).join('')}</div>`;
 
   const stuck = S.projects.filter(p => !isFinalStage(p) && Date.now() - lastActivity(p) > 10 * 864e5);
   const overdue = openTasks().filter(t => t.due && t.due < today);
@@ -535,14 +554,14 @@ function viewReview() {
   if (stuck.length || overdue.length || fu.length) {
     h += `<h3>Needs attention</h3>`;
     if (stuck.length) h += `<div class="meta" style="margin:0 2px">No movement in 10+ days: move them forward, pause them, or drop them.</div>${stuck.map(projectCard).join('')}`;
-    if (overdue.length) h += `<div class="card">${overdue.map(t => taskRow(t)).join('')}</div>`;
-    if (fu.length) h += `<div class="card">${fu.map(personRow).join('')}</div>`;
+    if (overdue.length) h += `<div class="list">${overdue.map(t => taskRow(t)).join('')}</div>`;
+    if (fu.length) h += `<div class="list">${fu.map(personRow).join('')}</div>`;
   }
 
   const ideas = S.ideas.filter(i => !area(i.areaId)).length;
-  if (ideas) h += `<button class="banner" data-a="tab" data-v="ideas" style="background:var(--surface);border-color:var(--line)">💡 ${ideas} unsorted idea${ideas > 1 ? 's' : ''}: sort them into an area or turn them into tasks →</button>`;
+  if (ideas) h += `<button class="nudge" data-a="tab" data-v="ideas">💡 ${ideas} unsorted idea${ideas > 1 ? 's' : ''} to sort →</button>`;
 
-  h += `<h3>Reflect</h3><form class="card" data-form="review" data-week="${wk}">
+  h += `<h3>Reflect</h3><form data-form="review" data-week="${wk}">
     <label>What went well?<textarea name="wins" placeholder="Finished the prototype housing, emailed two mentors…">${esc(r.wins)}</textarea></label>
     <label>What got in the way?<textarea name="blockers" placeholder="Late meetings, too many things in one evening…">${esc(r.blockers)}</textarea></label>
     <label>The one thing that matters most next week<input name="focus" value="${esc(r.focus)}" placeholder="e.g. Book first mentor call"></label>
@@ -557,6 +576,7 @@ function sheet(html, refresh = null) {
   const el = $('#sheet');
   $('#sheet-body').innerHTML = html;
   UI.sheetRefresh = refresh;
+  hydrateImages();
   if (el.hidden) {
     el.hidden = false;
     requestAnimationFrame(() => requestAnimationFrame(() => el.classList.add('open')));
@@ -621,6 +641,8 @@ function openProject(id, areaId, def = {}) {
       <div class="card">${ts.map(t => taskRow(t, { showProject: false })).join('') || '<div class="empty small">No tasks yet</div>'}
       <form data-form="inline-task" data-project="${id}" class="row gap" style="margin-top:10px"><input name="title" placeholder="Add a task…" required><button class="btn small">Add</button></form></div>`;
   }
+  const fabs = id ? S.fabrics.filter(f => f.projectId === id) : [];
+  if (fabs.length) h += `<h3>Fabrics</h3><div class="fab-grid small">${fabs.map(fabricCard).join('')}</div>`;
   sheet(h, id ? () => openProject(id) : null);
 }
 
@@ -657,6 +679,34 @@ function openIdea(id) {
   <div class="row gap"><button class="btn ghost small" data-a="idea-to-project" data-id="${id}">→ Make it a project</button><button class="btn ghost small" data-a="idea-to-task" data-id="${id}">→ Make it a task</button></div>`);
 }
 
+function photoStrip(ids) {
+  return ids.map(i => `<div class="ph"><img data-img="img:${i}" alt=""><button type="button" class="ph-x" data-a="rm-photo" data-id="${i}" aria-label="Remove photo">×</button></div>`).join('')
+    || '<div class="ph empty-ph">No photos yet</div>';
+}
+function openFabric(id) {
+  const f = id ? fabric(id) : { name: '', fiber: '', color: '', amount: '', source: '', status: 'In stash', projectId: '', plans: '', photos: [] };
+  if (!f) return closeSheet();
+  const projOpts = S.areas.map(a => {
+    const ps = S.projects.filter(p => p.areaId === a.id);
+    return ps.length ? `<optgroup label="${esc(a.name)}">${ps.map(p => `<option value="${p.id}" ${f.projectId === p.id ? 'selected' : ''}>${esc(p.name)}</option>`).join('')}</optgroup>` : '';
+  }).join('');
+  sheet(`<form data-form="fabric" data-id="${id || ''}">
+    <h2>${id ? esc(f.name || 'Fabric') : 'Add fabric'}</h2>
+    <div class="photo-strip" id="photo-strip">${photoStrip(f.photos || [])}</div>
+    <input type="hidden" name="photos" value="${esc((f.photos || []).join(','))}">
+    <label class="btn ghost small photo-add">📷 Add photos<input class="vh" type="file" accept="image/*" multiple data-photo></label>
+    <label>Name<input name="name" value="${esc(f.name)}" placeholder="e.g. Sage washed linen"></label>
+    <div class="two"><label>Fiber / type<input name="fiber" value="${esc(f.fiber)}" placeholder="Linen, silk, denim…"></label>
+      <label>Amount<input name="amount" value="${esc(f.amount)}" placeholder="e.g. 3 yd × 54in"></label></div>
+    <div class="two"><label>Color / print<input name="color" value="${esc(f.color)}" placeholder="e.g. Sage, gingham"></label>
+      <label>Status<select name="status">${FABRIC_STATUS.map(x => `<option ${f.status === x ? 'selected' : ''}>${x}</option>`).join('')}</select></label></div>
+    <label>What I want to make with it<textarea name="plans" placeholder="e.g. Wide-leg trousers, or lining for the spring jacket">${esc(f.plans)}</textarea></label>
+    <label>For a project<select name="projectId"><option value="">None</option>${projOpts}</select></label>
+    <label>Where from / cost<input name="source" value="${esc(f.source)}" placeholder="e.g. Mood Fabrics, $14/yd"></label>
+    <div class="sheet-actions">${id ? `<button type="button" class="btn ghost danger" data-a="del-fabric" data-id="${id}">Delete</button>` : ''}<button class="btn">${id ? 'Save' : 'Add to closet'}</button></div>
+  </form>`);
+}
+
 function openBlock(id, date) {
   const s = S.settings;
   const b = id ? S.blocks.find(x => x.id === id) : { date, start: s.eveningStart, end: s.eveningEnd, areaId: S.areas[0].id, projectId: null, title: '' };
@@ -670,7 +720,8 @@ function openBlock(id, date) {
     <label>Focus (optional)<input name="title" value="${esc(b.title)}" placeholder="e.g. Finish sensor calibration"></label>
     ${id && !S.sync ? `<div class="row gap" style="margin:4px 0 8px"><a class="btn ghost small" href="${gcalLink(b)}" target="_blank" rel="noopener">Google Calendar</a><button type="button" class="btn ghost small" data-a="ics-block" data-id="${id}">Apple / .ics</button></div>` : ''}
     <div class="sheet-actions">${id ? `<button type="button" class="btn ghost danger" data-a="del-block" data-id="${id}">Delete</button>` : ''}<button class="btn">${id ? 'Save' : 'Add block'}</button></div>
-  </form>`);
+  </form>
+  ${id ? '' : `<p class="foot"><button class="link muted" data-a="toggle-away" data-date="${esc(b.date)}">${isAway(b.date) ? 'Not away this day' : '✈ Away this day? Mark it and skip planning'}</button></p>`}`);
 }
 
 function suggestPlan(nHalves) {
@@ -895,6 +946,72 @@ async function pullEvents(force) {
   } catch (e) { /* keep the last copy of events */ }
 }
 
+/* ---------- Photos (IndexedDB: plenty of room, unlike localStorage) ---------- */
+const IDB = (() => {
+  let dbp;
+  const db = () => dbp || (dbp = new Promise((res, rej) => {
+    const r = indexedDB.open('afterhours-media', 1);
+    r.onupgradeneeded = () => r.result.createObjectStore('images');
+    r.onsuccess = () => res(r.result); r.onerror = () => rej(r.error);
+  }));
+  const run = (mode, fn) => db().then(d => new Promise((res, rej) => {
+    const t = d.transaction('images', mode), req = fn(t.objectStore('images'));
+    t.oncomplete = () => res(req && req.result); t.onerror = () => rej(t.error);
+  }));
+  return { get: k => run('readonly', st => st.get(k)), put: (k, v) => run('readwrite', st => st.put(v, k)), del: k => run('readwrite', st => st.delete(k)), keys: () => run('readonly', st => st.getAllKeys()) };
+})();
+async function compressImage(blob, max) {
+  const url = URL.createObjectURL(blob);
+  try {
+    const img = await new Promise((res, rej) => { const i = new Image(); i.onload = () => res(i); i.onerror = rej; i.src = url; });
+    const sc = Math.min(1, max / Math.max(img.naturalWidth, img.naturalHeight));
+    const c = document.createElement('canvas');
+    c.width = Math.round(img.naturalWidth * sc); c.height = Math.round(img.naturalHeight * sc);
+    c.getContext('2d').drawImage(img, 0, 0, c.width, c.height);
+    return await new Promise(res => c.toBlob(res, 'image/jpeg', 0.82));
+  } finally { URL.revokeObjectURL(url); }
+}
+const storePhoto = async (id, full, thumb) => { await IDB.put('img:' + id, full); await IDB.put('thumb:' + id, thumb); };
+const deletePhoto = id => { IDB.del('img:' + id).catch(() => {}); IDB.del('thumb:' + id).catch(() => {}); };
+const blobToDataURL = b => new Promise(res => { const r = new FileReader(); r.onload = () => res(r.result); r.readAsDataURL(b); });
+const imgURLs = {};
+function hydrateImages() {
+  document.querySelectorAll('img[data-img]:not([src])').forEach(async el => {
+    const k = el.dataset.img;
+    try {
+      if (!imgURLs[k]) { const b = await IDB.get(k); if (!b) return; imgURLs[k] = URL.createObjectURL(b); }
+      el.src = imgURLs[k];
+    } catch (e) { /* photo unavailable */ }
+  });
+}
+async function addPhotos(input) {
+  const form = input.closest('form'), hid = form.querySelector('[name=photos]');
+  const ids = hid.value ? hid.value.split(',') : [];
+  const files = [...input.files];
+  input.value = '';
+  if (!files.length) return;
+  toast(files.length > 1 ? `Adding ${files.length} photos…` : 'Adding photo…');
+  for (const file of files) {
+    try {
+      const id = uid(), full = await compressImage(file, 1600);
+      await storePhoto(id, full, await compressImage(full, 480));
+      ids.push(id);
+    } catch (e) { toast("Couldn't read that image"); }
+  }
+  hid.value = ids.join(',');
+  $('#photo-strip').innerHTML = photoStrip(ids);
+  hydrateImages();
+  const f = fabric(form.dataset.id);
+  if (f) { f.photos = ids; save(); render(); }
+}
+// Remove photos left behind by fabrics that were never saved or were deleted
+async function cleanupPhotos() {
+  try {
+    const used = new Set(S.fabrics.flatMap(f => f.photos || []));
+    (await IDB.keys()).forEach(k => { if (!used.has(String(k).split(':')[1])) IDB.del(k); });
+  } catch (e) { /* ignore */ }
+}
+
 /* ---------- Timer ---------- */
 function startTimer(o) {
   if (S.timer) stopTimer(true);
@@ -933,10 +1050,26 @@ const A = {
   'close-sheet': () => closeSheet(),
   'settings': () => openSettings(),
   'quick-add': () => {
+    if (UI.view === 'ideas' && UI.studio === 'fabrics') return openFabric(null);
     if (UI.view === 'ideas') { const t = $('.capture textarea'); if (t) { t.focus(); t.scrollIntoView({ block: 'center' }); } return; }
     openTask(null, { areaId: UI.view === 'projects' && UI.area !== 'all' ? UI.area : undefined });
   },
   'filter': d => { UI.area = d.id; render(); window.scrollTo(0, 0); },
+  'studio': d => { UI.studio = d.m; saveUI(); render(); window.scrollTo(0, 0); },
+  'fabric-filter': d => { UI.fabricFilter = d.id; render(); },
+  'new-fabric': () => openFabric(null),
+  'edit-fabric': d => openFabric(d.id),
+  'del-fabric': d => {
+    const f = fabric(d.id); if (!f || !confirm('Delete this fabric and its photos?')) return;
+    (f.photos || []).forEach(deletePhoto);
+    S.fabrics = S.fabrics.filter(x => x.id !== d.id); closeSheet(); commit();
+  },
+  'rm-photo': d => {
+    const form = $('form[data-form="fabric"]'); if (!form) return;
+    const hid = form.querySelector('[name=photos]'), ids = hid.value.split(',').filter(x => x && x !== d.id);
+    hid.value = ids.join(','); $('#photo-strip').innerHTML = photoStrip(ids); hydrateImages();
+    const f = fabric(form.dataset.id); if (f) { f.photos = ids; deletePhoto(d.id); save(); render(); }
+  },
   'idea-filter': d => { UI.ideaArea = d.id; render(); },
   'proj-mode': d => { UI.projMode = d.m; saveUI(); render(); },
   'new-project': d => openProject(null, d.area),
@@ -971,6 +1104,7 @@ const A = {
     S.flags.starter = true; commit(); toast(`Added ${n} projects. Edit anything that doesn't fit.`);
   },
   'starter-dismiss': () => { S.flags.starterDismissed = true; commit(); },
+  'more-next': () => { UI.moreNext = true; render(); },
   'low-energy': () => { S.lowEnergy = S.lowEnergy === todayKey() ? null : todayKey(); commit(); },
   'new-person': d => openPerson(null, d.area),
   'edit-person': d => openPerson(d.id),
@@ -1002,6 +1136,7 @@ const A = {
   'edit-block': d => openBlock(d.id),
   'del-block': d => { S.blocks = S.blocks.filter(b => b.id !== d.id); closeSheet(); commit(); },
   'toggle-away': d => {
+    closeSheet();
     const now = !isAway(d.date);
     if (now === autoAway(d.date)) delete S.away[d.date]; else S.away[d.date] = now;
     if (now) {
@@ -1054,7 +1189,13 @@ const A = {
     S.sync = null; S.cal = { events: [], errors: [], fetchedAt: 0 }; commit(); openSettingsKeepScroll();
   },
   'copy': async d => { try { await navigator.clipboard.writeText(d.text); toast('Link copied'); } catch (e) { prompt('Copy this link:', d.text); } },
-  'export': () => download(`after-hours-backup-${todayKey()}.json`, JSON.stringify({ ...S, sync: null }, null, 1), 'application/json'),
+  'export': async () => {
+    const images = {};
+    for (const f of S.fabrics) for (const id of f.photos || []) {
+      try { const b = await IDB.get('img:' + id); if (b) images[id] = await blobToDataURL(b); } catch (e) { /* skip unreadable photo */ }
+    }
+    download(`after-hours-backup-${todayKey()}.json`, JSON.stringify({ ...S, sync: null, images }), 'application/json');
+  },
   'import': () => $('#importFile').click(),
   'reset': () => {
     if (!confirm('Erase all projects, tasks, blocks and logged time on this device?')) return;
@@ -1112,6 +1253,15 @@ const F = {
     if (!text) return;
     S.ideas.push({ id: uid(), text, link: (f.get('link') || '').trim(), areaId: f.get('areaId') || '', created: Date.now(), starred: false });
     form.reset(); commit(); toast('Idea saved 💡');
+  },
+  fabric(f, form) {
+    const id = form.dataset.id;
+    const data = { name: (f.get('name') || '').trim(), fiber: f.get('fiber') || '', color: f.get('color') || '', amount: f.get('amount') || '', source: f.get('source') || '',
+      status: f.get('status'), plans: f.get('plans') || '', projectId: f.get('projectId') || '', photos: (f.get('photos') || '').split(',').filter(Boolean), updated: Date.now() };
+    if (id) Object.assign(fabric(id), data);
+    else S.fabrics.push({ id: uid(), created: Date.now(), ...data });
+    closeSheet(); commit();
+    if (!id) toast('Added to your fabric closet 🧵');
   },
   'idea-edit'(f, form) {
     const i = S.ideas.find(x => x.id === form.dataset.id);
@@ -1183,15 +1333,16 @@ const F = {
 /* ---------- Render ---------- */
 function render() {
   const now = new Date();
-  const titles = { tonight: isAway(todayKey()) ? 'Today' : isWorkDay(now) ? 'Tonight' : 'This weekend', projects: 'Projects', ideas: 'Ideas', week: 'Week', review: 'Weekly review' };
+  const titles = { tonight: isAway(todayKey()) ? 'Today' : isWorkDay(now) ? 'Tonight' : 'This weekend', projects: 'Projects', ideas: 'Studio', week: 'Week', review: 'Weekly review' };
   $('#title').textContent = titles[UI.view];
   $('#eyebrow').textContent = `${DAYS[now.getDay()]} · ${MON[now.getMonth()]} ${now.getDate()}`;
-  const views = { tonight: viewTonight, projects: viewProjects, ideas: viewIdeas, week: viewWeek, review: viewReview };
+  const views = { tonight: viewTonight, projects: viewProjects, ideas: viewStudio, week: viewWeek, review: viewReview };
   // Keep an in-progress idea draft when the list re-renders
   const draft = UI.view === 'ideas' && $('.capture textarea') ? $('.capture textarea').value : '';
   $('#main').innerHTML = views[UI.view]();
   if (draft && $('.capture textarea') && document.activeElement !== $('.capture textarea')) $('.capture textarea').value = draft;
   document.querySelectorAll('.tab').forEach(t => t.classList.toggle('on', t.dataset.v === UI.view));
+  hydrateImages();
   const pill = $('#timerpill');
   if (S.timer && UI.view !== 'tonight') {
     const t = task(S.timer.taskId), a = area(S.timer.areaId);
@@ -1219,7 +1370,11 @@ document.addEventListener('change', e => {
     const st = e.target.form.querySelector('select[name="stage"]'), a = area(e.target.value);
     if (st && a) st.innerHTML = a.stages.map(s => `<option>${esc(s)}</option>`).join('');
   }
+  if (e.target.matches('input[data-photo]')) addPhotos(e.target);
   if (e.target.dataset.aChange === 'reminder') { S.settings.reminderMin = +e.target.value; commit(); toast('Alert time updated'); }
+});
+document.addEventListener('input', e => {
+  if (e.target.id === 'fabric-search') { UI.fabricQuery = e.target.value; $('#fabric-grid').innerHTML = fabricGrid(); hydrateImages(); }
 });
 $('#importFile').addEventListener('change', async e => {
   const file = e.target.files[0];
@@ -1230,6 +1385,13 @@ $('#importFile').addEventListener('change', async e => {
     if (!d || !Array.isArray(d.areas) || !Array.isArray(d.tasks)) throw new Error('bad');
     if (!confirm('Replace everything on this device with the backup?')) return;
     const keepSync = S.sync;
+    if (d.images) {
+      toast('Restoring photos…');
+      for (const [id, url] of Object.entries(d.images)) {
+        try { const full = await (await fetch(url)).blob(); await storePhoto(id, full, await compressImage(full, 480)); } catch (e) { /* skip */ }
+      }
+      delete d.images;
+    }
     S = migrate(d);
     S.sync = keepSync;
     closeSheet(); commit(); toast('Backup restored');
@@ -1257,6 +1419,7 @@ document.addEventListener('visibilitychange', () => {
 
 render();
 pullEvents(); schedulePush();
+setTimeout(cleanupPhotos, 4000);
 if ('serviceWorker' in navigator && location.protocol !== 'file:') {
   const hadController = !!navigator.serviceWorker.controller;
   navigator.serviceWorker.register('sw.js').catch(() => {});
