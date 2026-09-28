@@ -75,7 +75,7 @@ const CLOSED_STATUS = ['Engaged', 'Not now'];
 function defaultState() {
   return {
     version: 2,
-    settings: { eveningStart: '18:00', eveningEnd: '22:00', workStart: '09:00', workEnd: '17:00', workDays: [1, 2, 3, 4, 5], reviewTime: '19:00', reminderMin: 10, theme: 'system' },
+    settings: { eveningStart: '18:00', eveningEnd: '22:00', workStart: '09:00', workEnd: '17:00', workDays: [1, 2, 3, 4, 5], reviewTime: '19:00', reminderMin: 10, theme: 'system', extraFields: false },
     areas: [
       { id: 'brand', name: 'Fashion Brand', color: '#d4899f', target: 6, stages: STAGES.brand.slice() },
       { id: 'fashion', name: 'Fashion Projects', color: '#9f8fd0', target: 4, stages: STAGES.fashion.slice() },
@@ -83,7 +83,7 @@ function defaultState() {
       { id: 'side', name: 'Side Projects', color: '#79b08f', target: 2, stages: STAGES.side.slice(), pipe: false },
     ],
     projects: [], tasks: [], blocks: [], sessions: [], people: [], ideas: [], fabrics: [],
-    top3: {}, reviews: {}, away: {}, timer: null, lowEnergy: null, flags: {},
+    top3: {}, reviews: {}, away: {}, energy: {}, restMoved: {}, timer: null, flags: {},
     sync: null, cal: { events: [], errors: [], fetchedAt: 0 },
   };
 }
@@ -112,7 +112,7 @@ function migrate(d) {
     d.version = 2;
   }
   ['people', 'ideas', 'fabrics'].forEach(k => { if (!Array.isArray(d[k])) d[k] = []; });
-  ['away', 'flags', 'top3', 'reviews'].forEach(k => { if (!d[k] || typeof d[k] !== 'object') d[k] = {}; });
+  ['away', 'flags', 'top3', 'reviews', 'energy', 'restMoved'].forEach(k => { if (!d[k] || typeof d[k] !== 'object') d[k] = {}; });
   if (!d.cal || !Array.isArray(d.cal.events)) d.cal = def.cal;
   // Softer palette: swap untouched original colors for the muted ones
   const OLD_COLORS = { '#f29fc5': '#d4899f', '#c9a7ff': '#9f8fd0', '#7cc4ff': '#6f9cc9', '#8fe0b0': '#79b08f', '#f4b86a': '#c7896b' };
@@ -170,6 +170,29 @@ function lastActivity(p) {
 }
 const isFinalStage = p => { const a = area(p.areaId); return a && a.stages.indexOf(p.stage) === a.stages.length - 1; };
 const dueFollowUps = () => S.people.filter(p => p.next && p.next <= todayKey() && !CLOSED_STATUS.includes(p.status)).sort((a, b) => a.next.localeCompare(b.next));
+
+/* ---------- Energy: full / light / rest evenings ---------- */
+const energyOf = k => S.energy[k] || '';
+// What an evening turned out to be, for the review strip
+function eveningKind(k) {
+  if (S.energy[k]) return S.energy[k];
+  if (isAway(k)) return 'away';
+  const d0 = parseKey(k).getTime(), d1 = addDays(parseKey(k), 1).getTime();
+  const worked = S.sessions.some(x => x.start >= d0 && x.start < d1) || S.tasks.some(t => t.doneAt >= d0 && t.doneAt < d1);
+  return worked ? 'full' : '';
+}
+// Weekdays that were light or rest at least twice (and half the time) over the last 8 weeks
+function lowEnergyDays() {
+  const tally = {};
+  for (let i = 1; i <= 56; i++) {
+    const d = addDays(new Date(), -i), k = dkey(d), e = eveningKind(k);
+    if (!e || e === 'away') continue;
+    const t = tally[d.getDay()] = tally[d.getDay()] || { low: 0, n: 0 };
+    t.n++; if (e === 'light' || e === 'rest') t.low++;
+  }
+  return Object.entries(tally).filter(([, t]) => t.low >= 2 && t.low / t.n >= .5).map(([d]) => +d);
+}
+const quickTasks = () => openTasks().sort((a, b) => (isLight(b) - isLight(a)) || ((+a.est || 999) - (+b.est || 999)) || taskSort(a, b));
 
 /* ---------- Apple Calendar events ---------- */
 const TRIP = /\b(trip|travel(l?ing)?|flight|fly(ing)?|vacation|holiday|away|out of town|getaway|retreat|wedding|visiting)\b|✈|🏖|🧳/i;
@@ -306,62 +329,126 @@ function bar(a, logged, planned) {
 }
 
 /* ---------- Views ---------- */
-function viewTonight() {
-  const now = new Date(), k = todayKey(), s = S.settings;
-  const work = isWorkDay(now), nowMin = now.getHours() * 60 + now.getMinutes();
-  const es = toMin(s.eveningStart), ee = toMin(s.eveningEnd), away = isAway(k);
-  const blocks = S.blocks.filter(b => b.date === k).sort((a, b) => a.start.localeCompare(b.start));
-  const evs = calEvents(k).filter(e => !e.allDay);
+function currentBlock(blocks) {
+  const now = new Date(), m = now.getHours() * 60 + now.getMinutes();
+  return blocks.find(b => toMin(b.start) <= m && m < toMin(b.end)) || blocks.find(b => toMin(b.start) > m) || null;
+}
+function blockName(b) { const p = project(b.projectId), a = area(b.areaId); return b.title || (p && p.name) || (a && a.name) || 'Focus'; }
 
-  // One line that says what tonight is
-  let line;
-  if (away) line = `You're away today. Enjoy it ✈️`;
-  else if (blocks.length) {
-    const names = [...new Set(blocks.map(b => { const p = project(b.projectId), a = area(b.areaId); return b.title || (p && p.name) || (a && a.name); }))];
-    line = `${fmtTime(blocks[0].start)}–${fmtTime(blocks[blocks.length - 1].end)} · ${esc(names.join(', then '))}`;
-  } else if (work) line = 'Nothing planned tonight';
-  else line = 'Weekend. No plan, no pressure';
-  if (work && !away && nowMin >= es && nowMin < ee) line += ` · ${fmtDur(ee - nowMin)} left`;
+function focusCard(k, blocks) {
+  const now = new Date(), m = now.getHours() * 60 + now.getMinutes(), s = S.settings;
+  const work = isWorkDay(now), energy = energyOf(k);
+  const energyLink = `<button class="card-link" data-a="energy">${energy ? 'Change tonight\'s energy' : 'Low on energy?'}</button>`;
 
-  let h = `<button class="tonight-line" data-a="${blocks.length ? 'edit-block' : 'tab'}" data-id="${blocks[0] ? blocks[0].id : ''}" data-v="week">${line}</button>`;
-  if (evs.length) h += `<p class="also">Also today: ${evs.map(e => `${fmtTime(hhmm(e.s))} ${esc(e.title)}`).join(' · ')}</p>`;
-  if (!blocks.length && work && !away) h += `<button class="link" data-a="new-block" data-date="${k}" style="margin-top:6px">+ Plan tonight</button>`;
-
-  if (!S.projects.length && !S.tasks.length) {
-    h += `<div class="card hero"><h2>Welcome</h2>
-      <p>Start by adding your projects, or load a starter plan for your prototype and brand.</p>
-      <button class="btn small" data-a="tab" data-v="projects">Get started</button></div>`;
+  if (S.timer) {
+    const t = task(S.timer.taskId), a = area(S.timer.areaId), p = project(S.timer.projectId);
+    return `<div class="dcard focus"><span class="k">Focusing</span>
+      <div class="big">${esc((t && t.title) || (p && p.name) || (a && a.name) || 'Focus')}</div>
+      <span class="small">${esc([a && a.name, t && p ? p.name : ''].filter(Boolean).join(' · '))}</span>
+      <div class="elapsed" data-elapsed>${fmtClock(Date.now() - S.timer.start)}</div>
+      <div class="spacer"></div><div class="card-actions"><button class="go" data-a="stop-timer">Stop &amp; log</button></div></div>`;
+  }
+  if (energy === 'rest') {
+    return `<div class="dcard focus"><span class="k">Rest night</span><div class="big">Take the night off</div>
+      <span class="small">Your unfinished Top 3 moved to tomorrow, and tonight's blocks are skipped. Resting counts too.</span>
+      <div class="spacer"></div><button class="card-link" data-a="energy-undo">Changed your mind? Undo</button></div>`;
+  }
+  if (isAway(k)) {
+    return `<div class="dcard focus"><span class="k">Away</span><div class="big">Enjoy the trip</div>
+      <span class="small">Nothing planned today. The plan will be here when you're back.</span><div class="spacer"></div></div>`;
+  }
+  if (energy === 'light') {
+    const q = quickTasks().slice(0, 3);
+    return `<div class="dcard focus"><span class="k">Light night</span><div class="big">Just one small thing</div>
+      <span class="small">Pick any of these, or do nothing. Small still counts.</span>
+      <div class="focus-list">${q.map(t => taskRow(t)).join('') || '<p class="small">No tasks yet.</p>'}</div>
+      <div class="spacer"></div>
+      <div class="card-actions">${q[0] ? `<button class="go" data-a="start-timer" data-id="${q[0].id}">Start 25 minutes</button>` : ''}${energyLink}</div></div>`;
   }
 
+  const cur = currentBlock(blocks);
+  if (!blocks.length) {
+    if (!work) return `<div class="dcard focus"><span class="k">Weekend</span><div class="big">No plan, no pressure</div>
+      <span class="small">Bonus time only if you feel like it.</span><div class="spacer"></div>
+      <div class="card-actions"><button class="go" data-a="new-block" data-date="${k}">Add a bonus block</button></div></div>`;
+    return `<div class="dcard focus"><span class="k">Tonight · ${fmtTime(s.eveningStart)}–${fmtTime(s.eveningEnd)}</span><div class="big">What's tonight for?</div>
+      <div class="focus-picks">${S.areas.map(a => `<button class="pick-area" data-a="quick-block" data-area="${a.id}"><i class="dot" style="background:${a.color}"></i>${esc(a.name)}</button>`).join('')}</div>
+      <div class="spacer"></div><div class="card-actions">${energyLink}</div></div>`;
+  }
+  if (!cur) {
+    const plan = blocks.map(b => { const a = area(b.areaId); return `<li class="past"><span class="t">${fmtTime(b.start).replace(/(am|pm)$/, '')}–${fmtTime(b.end)}</span><i class="bar" style="color:${a ? a.color : '#aaa'}"></i>${esc(blockName(b))}</li>`; }).join('');
+    return `<div class="dcard focus"><span class="k">Tonight's plan is done</span><div class="big">That's a wrap</div>
+      <span class="small">Rest up. Tomorrow's plan will be here when you open the app.</span><ul class="plan">${plan}</ul>
+      <div class="spacer"></div><div class="card-actions"><button class="card-link" data-a="pick-focus">Keep going anyway</button></div></div>`;
+  }
+  const live = cur && toMin(cur.start) <= m;
+  const focus = cur || blocks[blocks.length - 1];
+  const nextTask = openTasks().filter(t => focus.projectId ? t.projectId === focus.projectId : t.areaId === focus.areaId).sort(taskSort)[0];
+  const kline = live ? `Now · ${fmtDur(toMin(focus.end) - m)} left in this block` : cur ? `Starts at ${fmtTime(focus.start)}` : "Tonight's blocks are done";
+  const plan = blocks.map(b => {
+    const st = toMin(b.end) <= m ? 'past' : b === cur && live ? 'now' : 'later';
+    const a = area(b.areaId);
+    return `<li class="${st}"><span class="t">${fmtTime(b.start).replace(/(am|pm)$/, '')}–${fmtTime(b.end)}</span><i class="bar" style="color:${a ? a.color : '#aaa'}"></i>${esc(blockName(b))}</li>`;
+  }).join('');
+  return `<div class="dcard focus"><span class="k">${kline}</span>
+    <div class="big">${esc(blockName(focus))}</div>
+    ${nextTask ? `<span class="small">Next: ${esc(nextTask.title)}</span>` : ''}
+    <ul class="plan">${plan}</ul>
+    <div class="spacer"></div>
+    <div class="card-actions"><button class="go" data-a="${nextTask ? 'start-timer' : 'focus-area'}" data-id="${nextTask ? nextTask.id : ''}" data-area="${focus.areaId}">Start focusing</button>${energyLink}</div></div>`;
+}
+
+function viewTonight() {
+  const now = new Date(), k = todayKey();
+  const blocks = S.blocks.filter(b => b.date === k && !b.skipped).sort((a, b) => a.start.localeCompare(b.start));
+  let h = '';
   const thisWk = dkey(weekStart(now)), lastWk = dkey(addDays(weekStart(now), -7));
   if (now.getDay() === 0 && !S.reviews[thisWk]) h += `<button class="nudge" data-a="review-week" data-o="0">Sunday review · 10 min →</button>`;
   else if ([1, 2].includes(now.getDay()) && !S.reviews[lastWk] && S.sessions.length) h += `<button class="nudge" data-a="review-week" data-o="-1">Catch up on last week's review →</button>`;
 
-  if (S.timer) h += timerCard();
+  if (!S.projects.length && !S.tasks.length) {
+    return h + `<div class="deck"><div class="dcard focus"><span class="k">Welcome</span><div class="big">Let's set up your evenings</div>
+      <span class="small">Add your projects, or load a starter plan for your prototype and brand.</span><div class="spacer"></div>
+      <div class="card-actions"><button class="go" data-a="tab" data-v="projects">Get started</button></div></div></div>`;
+  }
 
+  const rest = energyOf(k) === 'rest' || energyOf(k) === 'light';
   const top = (S.top3[k] || []).map(task).filter(Boolean);
-  h += `<h3>Top 3</h3><div class="list">`;
-  h += top.map((t, i) => taskRow(t, { num: i + 1 })).join('');
+  let top3 = `<div class="dcard"><span class="k">${rest ? 'Optional tonight' : 'The three that matter'}</span><div class="big">Top 3</div><div class="card-list">`;
+  top3 += top.map((t, i) => taskRow(t, { num: i + 1 })).join('');
   if (!top.length) {
     const carry = carryOver();
-    h += carry.length ? `<button class="add-line" data-a="carry">↻ Carry over ${carry.length} from ${fmtDay(carry.key).toLowerCase()}</button>` : '';
+    top3 += carry.length ? `<button class="add-line" data-a="carry">↻ Carry over ${carry.length} from ${fmtDay(carry.key).toLowerCase()}</button>` : '<p class="small">Choose up to three things that would make tonight a win.</p>';
   }
-  if (top.length < 3) h += `<button class="add-line" data-a="pick-top3">+ Choose ${top.length ? 'another' : "tonight's top 3"}</button>`;
-  h += `</div>`;
+  if (top.length < 3) top3 += `<button class="add-line" data-a="pick-top3">+ Choose ${top.length ? 'another' : 'your top 3'}</button>`;
+  top3 += `</div></div>`;
 
   const fu = dueFollowUps();
-  if (fu.length) h += `<h3>Follow up</h3><div class="list">${fu.map(personRow).join('')}</div>`;
-
-  const low = S.lowEnergy === k;
   const blockAreas = new Set(blocks.map(b => b.areaId)), blockProjects = new Set(blocks.map(b => b.projectId).filter(Boolean));
   const topIds = new Set(S.top3[k] || []);
-  const all = openTasks().filter(t => !topIds.has(t.id) && (low ? isLight(t) : !blockAreas.size || blockAreas.has(t.areaId)))
-    .sort((a, b) => (blockProjects.has(b.projectId) - blockProjects.has(a.projectId)) || taskSort(a, b));
-  const shown = UI.moreNext ? all.slice(0, 15) : all.slice(0, 4);
-  h += `<div class="row between"><h3>${low ? 'Light tasks' : 'Up next'}</h3><button class="toggle ${low ? 'on' : ''}" data-a="low-energy">${low ? 'Low energy ✓' : 'Low energy?'}</button></div>`;
-  h += shown.length ? `<div class="list">${shown.map(t => taskRow(t)).join('')}${all.length > shown.length ? `<button class="add-line muted" data-a="more-next">Show ${all.length - shown.length} more</button>` : ''}</div>`
-    : `<p class="empty small">${low ? 'Nothing light yet. Mark a task "Light / admin", or give it 30 minutes or less.' : 'All clear. Tap + to add a task.'}</p>`;
+  const late = now.getHours() >= 21;
+  const all = openTasks().filter(t => !topIds.has(t.id) && (!blockAreas.size || blockAreas.has(t.areaId)))
+    .sort((a, b) => (late ? isLight(b) - isLight(a) : 0) || (blockProjects.has(b.projectId) - blockProjects.has(a.projectId)) || taskSort(a, b));
+  const shown = UI.moreNext ? all.slice(0, 15) : all.slice(0, 5);
+  let next = `<div class="dcard"><span class="k">${blockAreas.size ? "For tonight's areas" : 'Across everything'}</span><div class="big">Up next</div><div class="card-list">`;
+  next += fu.map(personRow).join('');
+  next += shown.map(t => taskRow(t)).join('') || (fu.length ? '' : '<p class="small">All clear. Tap + to add a task.</p>');
+  if (all.length > shown.length) next += `<button class="add-line muted" data-a="more-next">Show ${all.length - shown.length} more</button>`;
+  next += `</div></div>`;
+
+  h += `<div class="deck" data-deck>${focusCard(k, blocks)}${top3}${next}</div>
+    <div class="deck-dots">${[0, 1, 2].map(i => `<i class="${i === (UI.deckIdx || 0) ? 'on' : ''}"></i>`).join('')}</div>`;
   return h;
+}
+
+function openEnergy() {
+  const k = todayKey(), cur = energyOf(k) || 'full';
+  const opt = (v, t, d) => `<button class="energy-opt ${cur === v ? 'on' : ''}" data-a="set-energy" data-v="${v}"><b>${t}</b><span>${d}</span></button>`;
+  sheet(`<h2>How's your energy tonight?</h2>
+    ${opt('full', 'Full evening', 'Stick to the plan.')}
+    ${opt('light', 'Light night', 'Just one small thing: your quickest tasks and a 25-minute timer.')}
+    ${opt('rest', 'Rest tonight', 'Take the night off. Unfinished Top 3 moves to tomorrow and tonight\'s blocks are skipped.')}
+    <p class="meta" style="margin-top:14px">Your choice is saved so the weekly review can spot patterns, like evenings that are often low-energy.</p>`);
 }
 
 function carryOver() {
@@ -386,25 +473,27 @@ function viewProjects() {
       h += `<div class="starter"><span>✨ Want a starter plan for your prototype and brand?</span>
         <span class="row gap"><button class="link" data-a="starter">Add it</button><button class="link muted" data-a="starter-dismiss">No thanks</button></span></div>`;
     }
-    h += `<div class="list areas">${S.areas.map(a => {
-      const ps = S.projects.filter(p => p.areaId === a.id && !isFinalStage(p));
-      const open = S.tasks.filter(t => t.areaId === a.id && !t.done);
-      const next = open.sort(taskSort)[0];
-      return `<button class="area-row" data-a="filter" data-id="${a.id}">
-        <i class="dot big" style="background:${a.color}"></i>
-        <span class="area-main"><span class="area-name">${esc(a.name)}</span>
-          <span class="meta">${ps.length ? `${ps.length} active project${ps.length > 1 ? 's' : ''}` : 'No projects yet'}${next ? ` · next: ${esc(next.title)}` : ''}</span></span>
-        <span class="chev">›</span></button>`;
-    }).join('')}</div>`;
+    h += `<div class="deck" data-deck>${S.areas.map(a => {
+      const ps = S.projects.filter(p => p.areaId === a.id && !isFinalStage(p)).sort((x, y) => lastActivity(y) - lastActivity(x));
+      const open = S.tasks.filter(t => t.areaId === a.id && !t.done).sort(taskSort);
+      return `<div class="dcard area-card" style="--c:${a.color}">
+        <span class="k"><i class="dot" style="background:${a.color}"></i>${fmtDur(logged[a.id] || 0)} of ${a.target || 0}h this week</span>
+        <div class="big">${esc(a.name)}</div>
+        <span class="small">${ps.length ? `${ps.length} active project${ps.length > 1 ? 's' : ''} · ${open.length} open task${open.length === 1 ? '' : 's'}` : 'No projects yet'}</span>
+        <div class="card-list">${ps.slice(0, 4).map(p => `<button class="mini-proj" data-a="open-project" data-id="${p.id}"><span>${esc(p.name)}</span><span class="stage">${esc(p.stage || '')}</span></button>`).join('')}</div>
+        <div class="spacer"></div>
+        <div class="card-actions"><button class="go" data-a="filter" data-id="${a.id}">Open ${esc(a.name)}</button><button class="card-link" data-a="new-project" data-area="${a.id}">+ New project</button></div>
+      </div>`;
+    }).join('')}</div>
+    <div class="deck-dots">${S.areas.map((_, i) => `<i class="${i === (UI.deckIdx || 0) ? 'on' : ''}"></i>`).join('')}</div>`;
     return h;
   }
 
   const a = area(UI.area);
   h += `<button class="back" data-a="filter" data-id="all">‹ All areas</button>`;
-  h += `<div class="row between" style="margin:2px 0 4px"><span class="meta">${fmtDur(logged[a.id] || 0)} of ${a.target || 0}h this week</span>
-    <div class="seg mini">${['list', 'board'].map(m => `<button class="${UI.projMode === m ? 'on' : ''}" data-a="proj-mode" data-m="${m}">${m === 'list' ? 'List' : 'Board'}</button>`).join('')}</div></div>`;
+  h += `<p class="meta" style="margin:0 0 4px">${fmtDur(logged[a.id] || 0)} of ${a.target || 0}h this week</p>`;
 
-  if (UI.projMode === 'board') {
+  if (false) {
     h += `<div class="meta" style="margin:6px 2px">Swipe across the stages →</div><div class="board">${a.stages.map((st, i) => {
       const ps = S.projects.filter(p => p.areaId === a.id && (p.stage === st || (i === 0 && !a.stages.includes(p.stage))));
       return `<div class="col"><div class="col-head">${esc(st)}<span>${ps.length}</span></div>${ps.map(projectCard).join('') || '<div class="empty small">·</div>'}</div>`;
@@ -516,7 +605,6 @@ function viewWeek() {
     </div>`;
   }
   h += `</div>`;
-  if (!S.sync) h += `<p class="foot"><button class="link muted" data-a="ics-week" data-week="${dkey(ws)}">Export this week to a calendar</button></p>`;
   return h;
 }
 
@@ -544,6 +632,15 @@ function viewReview() {
     <div class="stat"><b>${fmtDur(total)}</b><span>focused</span></div>
     <div class="stat"><b>${evenings}</b><span>days worked</span></div></div>`;
 
+  const kinds = [...Array(7)].map((_, i) => { const d = addDays(ws, i); return { d, e: eveningKind(dkey(d)) }; });
+  const cnt = e => kinds.filter(x => x.e === e).length;
+  const SYM = { full: '●', light: '◐', rest: '○', away: '✈', '': '·' };
+  const LBL = { full: 'worked', light: 'light', rest: 'rest', away: 'away', '': '' };
+  h += `<h3>Your evenings</h3><div class="evenings">${kinds.map(x => `<div class="ev ${x.e || 'none'}"><span class="sym">${SYM[x.e]}</span><span class="dow">${DOW[x.d.getDay()][0]}</span><span class="lbl">${LBL[x.e]}</span></div>`).join('')}</div>`;
+  const parts = [cnt('full') && `${cnt('full')} worked`, cnt('light') && `${cnt('light')} light`, cnt('rest') && `${cnt('rest')} rest`].filter(Boolean);
+  const lows = lowEnergyDays();
+  h += `<p class="meta">${parts.length ? parts.join(' · ') + '. Rest nights are part of the plan, not a miss.' : 'Nothing logged yet this week.'}</p>`;
+  if (lows.length) h += `<p class="insight">${lows.map(d => DAYS[d] + 's').join(' and ')} are often low-energy for you, so the planner keeps those evenings light.</p>`;
   h += `<h3>Time balance</h3><div>${S.areas.map(a => bar(a, logged[a.id] || 0, planned[a.id] || 0)).join('')}
     <div class="legend">Solid = logged · faint = planned · full bar = weekly target</div>
     <button class="link muted" data-a="log-time" style="margin-top:10px">+ Log time you forgot to track</button></div>`;
@@ -602,15 +699,15 @@ function openTask(id, def = {}) {
     <h2>${id ? 'Edit task' : 'New task'}</h2>
     <label>Task<input name="title" required value="${esc(t.title)}" placeholder="e.g. Test prototype battery life" ${id ? '' : 'autofocus'}></label>
     <label>Project<select name="target">${areaOptions(sel, { withProjects: true })}</select></label>
+    <label>Due (optional)<input type="date" name="due" value="${esc(t.due)}"></label>
+    <label class="check-label"><input type="checkbox" name="quick" ${isLight(t) ? 'checked' : ''}> Quick task <span class="meta">(30 min or less, good for light nights)</span></label>
     <label class="check-label"><input type="checkbox" name="top3" ${inTop ? 'checked' : ''}> Add to tonight's Top 3</label>
-    <details class="more" ${t.due || t.est || t.energy || (t.priority && t.priority !== 'normal') || t.notes ? 'open' : ''}><summary>More details</summary>
-    <div class="two" style="margin-top:10px">
-      <label>Due<input type="date" name="due" value="${esc(t.due)}"></label>
+    <details class="more" ${t.notes || (S.settings.extraFields && (t.est || t.energy === 'deep' || (t.priority && t.priority !== 'normal'))) ? 'open' : ''}><summary>${S.settings.extraFields ? 'More details' : 'Notes'}</summary>
+    ${S.settings.extraFields ? `<div class="two" style="margin-top:10px">
       <label>Time needed<select name="est"><option value="">None</option>${est.map(m => `<option value="${m}" ${+t.est === m ? 'selected' : ''}>${fmtDur(m)}</option>`).join('')}</select></label>
-    </div>
-    <label>Energy<div class="seg">${[['deep', 'Deep focus'], ['light', 'Light / admin']].map(([v, l]) => `<label><input type="radio" name="energy" value="${v}" ${t.energy === v ? 'checked' : ''}><span>${l}</span></label>`).join('')}</div></label>
-    <label>Priority<div class="seg">${['low', 'normal', 'high'].map(p => `<label><input type="radio" name="priority" value="${p}" ${(t.priority || 'normal') === p ? 'checked' : ''}><span>${p[0].toUpperCase() + p.slice(1)}</span></label>`).join('')}</div></label>
-    <label>Notes<textarea name="notes" placeholder="Links, measurements, ideas…">${esc(t.notes)}</textarea></label>
+      <label>Priority<select name="priority">${['low', 'normal', 'high'].map(p => `<option value="${p}" ${(t.priority || 'normal') === p ? 'selected' : ''}>${p[0].toUpperCase() + p.slice(1)}</option>`).join('')}</select></label>
+    </div>` : `<input type="hidden" name="est" value="${esc(t.est)}"><input type="hidden" name="priority" value="${esc(t.priority || 'normal')}">`}
+    <label style="margin-top:10px">Notes<textarea name="notes" placeholder="Links, measurements, ideas…">${esc(t.notes)}</textarea></label>
     </details>
     ${id && !t.done && !(S.timer && S.timer.taskId === id) ? `<button type="button" class="btn ghost wide" data-a="start-timer" data-id="${id}" style="margin-top:6px">▶ Start focus timer</button>` : ''}
     <div class="sheet-actions">
@@ -747,10 +844,12 @@ function suggestPlan(nHalves) {
 function openPlanner(wk) {
   const ws = parseKey(wk), s = S.settings;
   const mid = fromMin(toMin(s.eveningStart) + Math.round(eveningMin() / 2));
+  const lowDays = lowEnergyDays();
   const days = [...Array(7)].map((_, i) => {
     const d = addDays(ws, i), k = dkey(d), away = isAway(k);
     const busyA = eveningOverlap(k, s.eveningStart, mid) >= 30, busyB = eveningOverlap(k, mid, s.eveningEnd) >= 30;
-    return { d, k, away, busy: [busyA, busyB], open: isWorkDay(d) && !away ? [!busyA, !busyB] : [false, false] };
+    const low = lowDays.includes(d.getDay());
+    return { d, k, away, low, busy: [busyA, busyB], open: isWorkDay(d) && !away ? [!busyA, !busyB && !low] : [false, false] };
   });
   const seq = suggestPlan(days.reduce((n, x) => n + x.open.filter(Boolean).length, 0));
   let si = 0;
@@ -762,7 +861,7 @@ function openPlanner(wk) {
       pair = [existing.find(b => b.start < mid), existing.find(b => b.end > mid)].map(b => (b ? b.areaId : ''));
     } else pair = x.open.map(o => (o ? seq[si++] || '' : ''));
     const evs = calEvents(x.k).filter(e => !e.allDay);
-    const note = x.away ? `✈ ${esc(awayReason(x.k) || 'Away')}` : evs.length ? evs.map(e => `${fmtTime(hhmm(e.s))} ${esc(e.title)}`).join(' · ') : '';
+    const note = x.away ? `✈ ${esc(awayReason(x.k) || 'Away')}` : [x.low && isWorkDay(x.d) ? 'Usually low-energy, so kept light' : '', ...evs.map(e => `${fmtTime(hhmm(e.s))} ${esc(e.title)}`)].filter(Boolean).join(' · ');
     return `<div class="plan-row"><span class="${isWorkDay(x.d) && !x.away ? '' : 'meta'}">${DOW[x.d.getDay()]} ${x.d.getDate()}</span>
       <select name="a${i}">${opts(pair[0])}</select><select name="b${i}">${opts(pair[1])}</select></div>
       ${note ? `<div class="plan-note">${note}</div>` : ''}`;
@@ -806,12 +905,13 @@ function openLogTime() {
 }
 
 function calendarSettings() {
-  if (!SYNC_URL) return `<p class="meta">Calendar sync isn't set up yet.</p>`;
+  const exp = `<p><button class="link muted" data-a="ics-week" data-week="${dkey(weekStart(new Date()))}">Export this week as a calendar file</button></p>`;
+  if (!SYNC_URL) return `<p class="meta">Calendar sync isn't set up yet.</p>` + exp;
   if (!S.sync) {
     return `<p class="meta" style="margin-top:-4px">Two-way sync with Apple Calendar:</p>
       <ul class="meta steps"><li>Your evening blocks, Sunday review and follow-ups appear in Apple Calendar, with alerts on your phone.</li>
       <li>Your Apple events show up here. Trips mark you away, and the planner keeps busy evenings free.</li></ul>
-      <button class="btn small" data-a="cal-connect">Connect Apple Calendar</button>`;
+      <button class="btn small" data-a="cal-connect">Connect Apple Calendar</button>${exp}`;
   }
   const feed = `${SYNC_URL.replace(/^https?:/, 'webcal:')}/cal/${S.sync.feedId}.ics`;
   const st = S.sync.lastErr ? `<span class="overdue">⚠ ${esc(S.sync.lastErr)}</span>` : S.sync.lastSync ? `Plan synced ${fmtAgo(S.sync.lastSync) === 'today' ? 'today at ' + fmtTime(hhmm(S.sync.lastSync)) : fmtAgo(S.sync.lastSync)}` : 'Not synced yet';
@@ -837,6 +937,7 @@ function openSettings() {
     <div class="two"><label>Work starts<input type="time" name="workStart" value="${s.workStart}"></label><label>Work ends<input type="time" name="workEnd" value="${s.workEnd}"></label></div>
     <label>Work days</label><div class="area-picks" style="margin:-6px 0 14px">${[1, 2, 3, 4, 5, 6, 0].map(d => `<label class="chip check-label" style="margin:0;gap:6px"><input type="checkbox" name="wd" value="${d}" ${s.workDays.includes(d) ? 'checked' : ''}>${DOW[d]}</label>`).join('')}</div>
     <label>Sunday review time<input type="time" name="reviewTime" value="${s.reviewTime}"></label>
+    <label class="check-label" style="margin-bottom:14px"><input type="checkbox" name="extraFields" ${s.extraFields ? 'checked' : ''}> Extra task fields (time needed, priority)</label>
     <label>Appearance<div class="seg">${[['system', 'Auto'], ['light', 'Light'], ['dark', 'Dark']].map(([v, l]) => `<label><input type="radio" name="theme" value="${v}" ${(s.theme || 'system') === v ? 'checked' : ''}><span>${l}</span></label>`).join('')}</div></label>
     <h3>Areas & weekly hour targets</h3>
     <p class="meta" style="margin-top:-4px">You have about ${fmtDur(eveningMin() * s.workDays.length)} of weeknight time. Stages are comma-separated, in order.</p>
@@ -897,7 +998,7 @@ function calendar(events, extra = []) {
 }
 function feedIcs() {
   const s = S.settings, from = dkey(addDays(new Date(), -14)), ev = [];
-  S.blocks.filter(b => b.date >= from).forEach(b => ev.push(blockEvent(b)));
+  S.blocks.filter(b => b.date >= from && !b.skipped).forEach(b => ev.push(blockEvent(b)));
   for (let w = 0; w < 6; w++) {
     const sun = addDays(weekStart(new Date()), 6 + 7 * w), slot = reviewSlot(sun);
     ev.push(vevent({ id: 'review-' + dkey(sun), date: slot.date, start: slot.start, end: fromMin(Math.min(toMin(slot.start) + 20, 1439)),
@@ -1109,7 +1210,32 @@ const A = {
   },
   'starter-dismiss': () => { S.flags.starterDismissed = true; commit(); },
   'more-next': () => { UI.moreNext = true; render(); },
-  'low-energy': () => { S.lowEnergy = S.lowEnergy === todayKey() ? null : todayKey(); commit(); },
+  'energy': () => openEnergy(),
+  'set-energy': d => {
+    const k = todayKey(), tom = dkey(addDays(new Date(), 1));
+    if (energyOf(k) === 'rest' && d.v !== 'rest') A['energy-undo']();
+    if (d.v === 'full') delete S.energy[k]; else S.energy[k] = d.v;
+    if (d.v === 'rest') {
+      if (S.timer) stopTimer(true);
+      const moved = (S.top3[k] || []).filter(id => { const t = task(id); return t && !t.done; });
+      const tl = S.top3[tom] = S.top3[tom] || [];
+      moved.forEach(id => { if (!tl.includes(id) && tl.length < 3) tl.push(id); });
+      S.top3[k] = (S.top3[k] || []).filter(id => !moved.includes(id));
+      S.restMoved[k] = moved;
+      S.blocks.forEach(b => { if (b.date === k) b.skipped = true; });
+    }
+    UI.deckIdx = 0; closeSheet(); commit();
+    toast(d.v === 'rest' ? 'Rest night logged. See you tomorrow 🌙' : d.v === 'light' ? 'Light night. One small thing is plenty.' : 'Full evening. You\'ve got this.');
+  },
+  'energy-undo': () => {
+    const k = todayKey(), tom = dkey(addDays(new Date(), 1)), moved = S.restMoved[k] || [];
+    delete S.energy[k];
+    S.top3[tom] = (S.top3[tom] || []).filter(id => !moved.includes(id));
+    S.top3[k] = [...new Set([...(S.top3[k] || []), ...moved])].slice(0, 3);
+    delete S.restMoved[k];
+    S.blocks.forEach(b => { if (b.date === k) delete b.skipped; });
+    commit();
+  },
   'new-person': d => openPerson(null, d.area),
   'edit-person': d => openPerson(d.id),
   'log-contact': d => {
@@ -1211,7 +1337,7 @@ const A = {
 const F = {
   task(f, form) {
     const id = form.dataset.id, tg = parseTarget(f.get('target'));
-    const data = { title: f.get('title').trim(), ...tg, due: f.get('due') || '', est: f.get('est') ? +f.get('est') : '', priority: f.get('priority') || 'normal', energy: f.get('energy') || '', notes: f.get('notes') || '' };
+    const data = { title: f.get('title').trim(), ...tg, due: f.get('due') || '', est: f.get('est') ? +f.get('est') : '', priority: f.get('priority') || 'normal', energy: f.get('quick') ? 'light' : (task(id) && task(id).energy === 'deep' ? 'deep' : ''), notes: f.get('notes') || '' };
     let t;
     if (id) { t = task(id); Object.assign(t, data); }
     else { t = { id: uid(), created: Date.now(), done: false, doneAt: null, ...data }; S.tasks.push(t); }
@@ -1313,6 +1439,7 @@ const F = {
     if (toMin(s.eveningEnd) <= toMin(s.eveningStart)) return toast('Your evening has to end after it starts');
     s.workDays = f.getAll('wd').map(Number);
     s.theme = f.get('theme') || 'system';
+    s.extraFields = !!f.get('extraFields');
     applyTheme();
     S.areas.forEach(a => {
       a.name = (f.get('name_' + a.id) || a.name).trim();
@@ -1349,11 +1476,16 @@ function render() {
   $('#eyebrow').textContent = `${DAYS[now.getDay()]} · ${MON[now.getMonth()]} ${now.getDate()}`;
   const views = { tonight: viewTonight, projects: viewProjects, ideas: viewStudio, week: viewWeek, review: viewReview };
   // Keep an in-progress idea draft when the list re-renders
+  const oldDeck = $('[data-deck]'), deckPos = oldDeck && UI.lastView === UI.view + UI.area ? oldDeck.scrollLeft : 0;
+  if (UI.lastView !== UI.view + UI.area) UI.deckIdx = 0;
+  UI.lastView = UI.view + UI.area;
   const draft = UI.view === 'ideas' && $('.capture textarea') ? $('.capture textarea').value : '';
   $('#main').innerHTML = views[UI.view]();
   if (draft && $('.capture textarea') && document.activeElement !== $('.capture textarea')) $('.capture textarea').value = draft;
   document.querySelectorAll('.tab').forEach(t => t.classList.toggle('on', t.dataset.v === (UI.view === 'review' ? 'week' : UI.view)));
   hydrateImages();
+  const deck = $('[data-deck]');
+  if (deck && deckPos) deck.scrollLeft = deckPos;
   const pill = $('#timerpill');
   if (S.timer && UI.view !== 'tonight') {
     const t = task(S.timer.taskId), a = area(S.timer.areaId);
@@ -1384,6 +1516,17 @@ document.addEventListener('change', e => {
   if (e.target.matches('input[data-photo]')) addPhotos(e.target);
   if (e.target.dataset.aChange === 'reminder') { S.settings.reminderMin = +e.target.value; commit(); toast('Alert time updated'); }
 });
+// Swipe decks: keep the page dots in step with the visible card
+document.addEventListener('scroll', e => {
+  const deck = e.target;
+  if (!deck.matches || !deck.matches('[data-deck]')) return;
+  const mid = deck.scrollLeft + deck.clientWidth / 2;
+  let best = 0, bd = Infinity;
+  [...deck.children].forEach((c, i) => { const d = Math.abs(c.offsetLeft + c.offsetWidth / 2 - mid); if (d < bd) { bd = d; best = i; } });
+  UI.deckIdx = best;
+  const dots = deck.nextElementSibling;
+  if (dots) [...dots.children].forEach((d, i) => d.classList.toggle('on', i === best));
+}, true);
 document.addEventListener('input', e => {
   if (e.target.id === 'fabric-search') { UI.fabricQuery = e.target.value; $('#fabric-grid').innerHTML = fabricGrid(); hydrateImages(); }
 });
