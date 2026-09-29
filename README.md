@@ -19,6 +19,10 @@ It opens full-screen like a native app and works offline.
 | **Week** | Evening time blocks (6–10pm by default) alongside your Apple Calendar. Mark days **Away**; trips are detected automatically. *Plan evenings* suggests whole nights per area from your weekly hour targets and skips busy or away evenings. |
 | **Review** | A 10-minute Sunday check-in (or Monday if you're away on Sunday): hours vs. target, wins, stalled projects, follow-ups, reflection, then plan next week. |
 
+## Today list
+The second card on Tonight is **Today**: your Top 3 pinned first, then everything else planned for the day. Type into the card to add something, or tap *Plan today from your tasks* (★ = Top 3). New tasks can be set for Today, Tomorrow or Someday.
+Anything left unchecked **rolls over to the next day automatically**, Top 3 included, and shows how long it has been carried (↻ 2 days). After 3 days it turns rose, and the task offers to move it to tomorrow or someday. The weekly review lists these under Needs attention.
+
 ## Low-energy evenings
 Tap **Low on energy?** on tonight's focus card:
 - **Light night:** shows your three quickest tasks and a 25-minute timer.

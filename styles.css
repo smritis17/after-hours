@@ -398,3 +398,18 @@ details.more summary::after { content: " ›"; } details.more[open] summary::aft
 .stat b { font-size: 24px; }
 .dcard.focus .elapsed { font-size: 46px; font-weight: 300; }
 .quick { margin-top: 0; }
+
+/* Today list */
+.list-gap { height: 10px; }
+.carried { color: var(--muted); }
+.carried.stale { color: var(--accent); font-weight: 500; }
+.today-add { display: flex; gap: 8px; margin-top: 14px; }
+.today-add input { background: var(--bg2); border-radius: 999px; padding: 11px 16px; }
+.add-btn { width: 44px; height: 44px; flex: none; border-radius: 50%; background: var(--btn); color: var(--btn-ink); font-size: 22px; text-align: center; line-height: 44px; }
+.pick { justify-content: space-between; }
+.pick-main { display: flex; align-items: center; gap: 10px; flex: 1; min-width: 0; text-align: left; }
+.pick-main .meta { margin-left: auto; padding-left: 8px; white-space: nowrap; }
+.star { font-size: 20px; width: 36px; text-align: center; color: var(--faint); flex: none; }
+.star.on { color: var(--accent); }
+.stale-note { background: var(--soft); border-radius: 14px; padding: 12px 14px; font-size: 14.5px; margin: -4px 0 14px; }
+.day-tasks { font-size: 13.5px; color: var(--muted); padding: 4px 0 2px; }

@@ -171,6 +171,30 @@ function lastActivity(p) {
 const isFinalStage = p => { const a = area(p.areaId); return a && a.stages.indexOf(p.stage) === a.stages.length - 1; };
 const dueFollowUps = () => S.people.filter(p => p.next && p.next <= todayKey() && !CLOSED_STATUS.includes(p.status)).sort((a, b) => a.next.localeCompare(b.next));
 
+/* ---------- Today list + rollover ---------- */
+const daysBetween = (a, b) => Math.round((parseKey(b) - parseKey(a)) / 864e5);
+const todaysTasks = () => { const k = todayKey(); return S.tasks.filter(t => t.day === k); };
+function carriedDays(t) { return t.firstDay && t.day && t.firstDay < t.day ? daysBetween(t.firstDay, t.day) : 0; }
+function scheduleTask(t, day) {
+  t.day = day || '';
+  if (!day) t.firstDay = '';
+  else if (!t.firstDay || t.firstDay > day) t.firstDay = day;
+}
+// Unchecked tasks from earlier days move to today; so does an unfinished Top 3
+function rollover() {
+  const k = todayKey();
+  S.tasks.forEach(t => { if (!t.done && t.day && t.day < k) { if (!t.firstDay) t.firstDay = t.day; t.day = k; } });
+  if (!(S.top3[k] || []).length) {
+    const prev = Object.keys(S.top3).filter(x => x < k && S.top3[x].length).sort().pop();
+    if (prev) {
+      const ids = S.top3[prev].filter(id => { const t = task(id); return t && !t.done; }).slice(0, 3);
+      if (ids.length) { S.top3[k] = ids; ids.forEach(id => { const t = task(id); if (t.day !== k) { if (!t.firstDay) t.firstDay = prev; t.day = k; } }); }
+    }
+  }
+  // Keep Top 3 history small
+  Object.keys(S.top3).forEach(x => { if (daysBetween(x, k) > 60) delete S.top3[x]; });
+}
+
 /* ---------- Energy: full / light / rest evenings ---------- */
 const energyOf = k => S.energy[k] || '';
 // What an evening turned out to be, for the review strip
@@ -227,13 +251,16 @@ function taskRow(t, { showProject = true, num } = {}) {
   const p = project(t.projectId), a = area(t.areaId), today = todayKey();
   const running = S.timer && S.timer.taskId === t.id;
   const bits = showProject ? [esc(p ? p.name : (a ? a.name : ''))].filter(Boolean) : [];
+  const showDot = showProject;
   if (t.due) bits.push(`<span class="${!t.done && t.due < today ? 'overdue' : ''}">${fmtDay(t.due)}</span>`);
+  const cd = !t.done && t.day === today ? carriedDays(t) : 0;
+  if (cd) bits.push(`<span class="carried ${cd >= 3 ? 'stale' : ''}">↻ ${cd} day${cd > 1 ? 's' : ''}</span>`);
   return `<div class="task ${t.done ? 'done' : ''}">
     ${num ? `<span class="num">${num}</span>` : ''}
     <button class="check" data-a="toggle-task" data-id="${t.id}" aria-label="Mark done">${t.done ? ICON.check : ''}</button>
     <button class="task-main" data-a="edit-task" data-id="${t.id}">
       <span class="task-title">${t.priority === 'high' ? '<span class="pri">!</span>' : ''}${esc(t.title)}</span>
-      ${bits.length ? `<span class="meta">${showProject ? `<i class="dot" style="background:${a ? a.color : '#888'}"></i>` : ''}${bits.join(' · ')}</span>` : ''}
+      ${bits.length ? `<span class="meta">${showDot && bits.length ? `<i class="dot" style="background:${a ? a.color : '#888'}"></i>` : ''}${bits.join(' · ')}</span>` : ''}
     </button>
     ${running ? `<button class="play on" data-a="stop-timer" aria-label="Stop timer">${ICON.stop}</button>` : ''}
   </div>`;
@@ -350,7 +377,7 @@ function focusCard(k, blocks) {
   }
   if (energy === 'rest') {
     return `<div class="dcard focus"><span class="k">Rest night</span><div class="big">Take the night off</div>
-      <span class="small">Your unfinished Top 3 moved to tomorrow, and tonight's blocks are skipped. Resting counts too.</span>
+      <span class="small">Today's unfinished tasks moved to tomorrow, and tonight's blocks are skipped. Resting counts too.</span>
       <div class="spacer"></div><button class="card-link" data-a="energy-undo">Changed your mind? Undo</button></div>`;
   }
   if (isAway(k)) {
@@ -413,30 +440,33 @@ function viewTonight() {
   }
 
   const rest = energyOf(k) === 'rest' || energyOf(k) === 'light';
-  const top = (S.top3[k] || []).map(task).filter(Boolean);
-  let top3 = `<div class="dcard"><span class="k">${rest ? 'Optional tonight' : 'The three that matter'}</span><div class="big">Top 3</div><div class="card-list">`;
-  top3 += top.map((t, i) => taskRow(t, { num: i + 1 })).join('');
-  if (!top.length) {
-    const carry = carryOver();
-    top3 += carry.length ? `<button class="add-line" data-a="carry">↻ Carry over ${carry.length} from ${fmtDay(carry.key).toLowerCase()}</button>` : '<p class="small">Choose up to three things that would make tonight a win.</p>';
-  }
-  if (top.length < 3) top3 += `<button class="add-line" data-a="pick-top3">+ Choose ${top.length ? 'another' : 'your top 3'}</button>`;
-  top3 += `</div></div>`;
+  const topIdsList = (S.top3[k] || []).filter(id => task(id));
+  const top = topIdsList.map(task);
+  const rest3 = todaysTasks().filter(t => !topIdsList.includes(t.id)).sort((a, b) => a.done - b.done || taskSort(a, b));
+  let today = `<div class="dcard"><span class="k">${rest ? 'Optional tonight' : top.length ? 'Top 3 first, then the rest' : 'Unfinished tasks roll over to tomorrow'}</span><div class="big">Today</div><div class="card-list">`;
+  today += top.map((t, i) => taskRow(t, { num: i + 1 })).join('');
+  if (top.length && rest3.length) today += `<div class="list-gap"></div>`;
+  today += rest3.map(t => taskRow(t)).join('');
+  if (!top.length && !rest3.length) today += `<p class="small">Nothing planned for today yet.</p>`;
+  today += `</div>
+    <form data-form="today-add" class="today-add"><input name="title" placeholder="Add something for today…" autocomplete="off" required><button class="add-btn" aria-label="Add">+</button></form>
+    <div class="spacer"></div>
+    <div class="card-actions"><button class="card-link" data-a="plan-today">Plan today from your tasks</button></div></div>`;
 
   const fu = dueFollowUps();
   const blockAreas = new Set(blocks.map(b => b.areaId)), blockProjects = new Set(blocks.map(b => b.projectId).filter(Boolean));
-  const topIds = new Set(S.top3[k] || []);
+  const topIds = new Set([...(S.top3[k] || []), ...todaysTasks().map(t => t.id)]);
   const late = now.getHours() >= 21;
   const all = openTasks().filter(t => !topIds.has(t.id) && (!blockAreas.size || blockAreas.has(t.areaId)))
     .sort((a, b) => (late ? isLight(b) - isLight(a) : 0) || (blockProjects.has(b.projectId) - blockProjects.has(a.projectId)) || taskSort(a, b));
   const shown = UI.moreNext ? all.slice(0, 15) : all.slice(0, 5);
-  let next = `<div class="dcard"><span class="k">${blockAreas.size ? "For tonight's areas" : 'Across everything'}</span><div class="big">Up next</div><div class="card-list">`;
+  let next = `<div class="dcard"><span class="k">${blockAreas.size ? "For tonight's areas" : 'Everything else'}</span><div class="big">Up next</div><div class="card-list">`;
   next += fu.map(personRow).join('');
   next += shown.map(t => taskRow(t)).join('') || (fu.length ? '' : '<p class="small">All clear. Tap + to add a task.</p>');
   if (all.length > shown.length) next += `<button class="add-line muted" data-a="more-next">Show ${all.length - shown.length} more</button>`;
   next += `</div></div>`;
 
-  h += `<div class="deck" data-deck>${focusCard(k, blocks)}${top3}${next}</div>
+  h += `<div class="deck" data-deck>${focusCard(k, blocks)}${today}${next}</div>
     <div class="deck-dots">${[0, 1, 2].map(i => `<i class="${i === (UI.deckIdx || 0) ? 'on' : ''}"></i>`).join('')}</div>`;
   return h;
 }
@@ -447,7 +477,7 @@ function openEnergy() {
   sheet(`<h2>How's your energy tonight?</h2>
     ${opt('full', 'Full evening', 'Stick to the plan.')}
     ${opt('light', 'Light night', 'Just one small thing: your quickest tasks and a 25-minute timer.')}
-    ${opt('rest', 'Rest tonight', 'Take the night off. Unfinished Top 3 moves to tomorrow and tonight\'s blocks are skipped.')}
+    ${opt('rest', 'Rest tonight', 'Take the night off. Today\'s unfinished tasks move to tomorrow and tonight\'s blocks are skipped.')}
     <p class="meta" style="margin-top:14px">Your choice is saved so the weekly review can spot patterns, like evenings that are often low-energy.</p>`);
 }
 
@@ -601,6 +631,7 @@ function viewWeek() {
         <button class="add-block" data-a="new-block" data-date="${k}" aria-label="Add block">+</button></span></div>
       ${evs.map(calEventLine).join('')}
       ${blocks.map(blockCard).join('')}
+      ${(() => { const n = S.tasks.filter(t => t.day === k && !t.done).length; return n && k >= today ? `<div class="day-tasks">${n} task${n > 1 ? 's' : ''} planned</div>` : ''; })()}
       ${review.date === k ? `<button class="review-slot" data-a="review-week" data-o="${UI.weekOffset}">${fmtTime(review.start)} · Weekly review</button>` : ''}
     </div>`;
   }
@@ -647,7 +678,7 @@ function viewReview() {
 
 
   const stuck = S.projects.filter(p => !isFinalStage(p) && Date.now() - lastActivity(p) > 10 * 864e5);
-  const overdue = openTasks().filter(t => t.due && t.due < today);
+  const overdue = openTasks().filter(t => (t.due && t.due < today) || carriedDays(t) >= 3);
   const fu = dueFollowUps();
   if (stuck.length || overdue.length || fu.length) {
     h += `<h3>Needs attention</h3>`;
@@ -689,8 +720,13 @@ function closeSheet() {
 }
 const refreshSheet = () => { if (UI.sheetRefresh && !$('#sheet').hidden) UI.sheetRefresh(); };
 
+function whenOf(t) {
+  const k = todayKey(), tom = dkey(addDays(new Date(), 1));
+  if (!t.day) return '';
+  return t.day <= k ? 'today' : t.day === tom ? 'tomorrow' : 'later';
+}
 function openTask(id, def = {}) {
-  const t = id ? task(id) : { title: def.title || '', areaId: def.areaId || S.areas[0].id, projectId: def.projectId || null, due: '', est: '', priority: 'normal', notes: def.notes || '', energy: '' };
+  const t = id ? task(id) : { day: def.day === undefined ? todayKey() : def.day, title: def.title || '', areaId: def.areaId || S.areas[0].id, projectId: def.projectId || null, due: '', est: '', priority: 'normal', notes: def.notes || '', energy: '' };
   if (!t) return;
   const sel = t.projectId ? 'proj:' + t.projectId : 'area:' + t.areaId;
   const inTop = id && (S.top3[todayKey()] || []).includes(id);
@@ -699,7 +735,10 @@ function openTask(id, def = {}) {
     <h2>${id ? 'Edit task' : 'New task'}</h2>
     <label>Task<input name="title" required value="${esc(t.title)}" placeholder="e.g. Test prototype battery life" ${id ? '' : 'autofocus'}></label>
     <label>Project<select name="target">${areaOptions(sel, { withProjects: true })}</select></label>
-    <label>Due (optional)<input type="date" name="due" value="${esc(t.due)}"></label>
+    <label>When<div class="seg">${[['today', 'Today'], ['tomorrow', 'Tomorrow'], ['', 'Someday']].map(([v, l]) => `<label><input type="radio" name="when" value="${v}" ${whenOf(t) === v ? 'checked' : ''}><span>${l}</span></label>`).join('')}</div></label>
+    ${id && carriedDays(t) >= 3 && !t.done ? `<div class="stale-note">This has rolled over ${carriedDays(t)} days. Try breaking it into something smaller, or move it off today:
+      <div class="row gap" style="margin-top:8px"><button type="button" class="link" data-a="task-when" data-id="${id}" data-v="tomorrow">Tomorrow</button><button type="button" class="link" data-a="task-when" data-id="${id}" data-v="">Someday</button></div></div>` : ''}
+    <label>Due date (optional)<input type="date" name="due" value="${esc(t.due)}"></label>
     <label class="check-label"><input type="checkbox" name="quick" ${isLight(t) ? 'checked' : ''}> Quick task <span class="meta">(30 min or less, good for light nights)</span></label>
     <label class="check-label"><input type="checkbox" name="top3" ${inTop ? 'checked' : ''}> Add to tonight's Top 3</label>
     <details class="more" ${t.notes || (S.settings.extraFields && (t.est || t.energy === 'deep' || (t.priority && t.priority !== 'normal'))) ? 'open' : ''}><summary>${S.settings.extraFields ? 'More details' : 'Notes'}</summary>
@@ -885,6 +924,16 @@ function openFocusPicker() {
     ${top.length ? `<h3>Top 3</h3>${top.map(pick).join('')}` : ''}
     <h3>A whole area</h3><div class="area-picks">${S.areas.map(a => `<button class="chip" data-a="focus-area" data-area="${a.id}"><i class="dot" style="background:${a.color}"></i>${esc(a.name)}</button>`).join('')}</div>
     ${rest.length ? `<h3>A task</h3>${rest.map(pick).join('')}` : ''}`);
+}
+
+function openTodayPicker() {
+  const k = todayKey(), tops = S.top3[k] || [];
+  const list = openTasks().sort((a, b) => ((b.day === k) - (a.day === k)) || taskSort(a, b));
+  sheet(`<h2>Plan today</h2><p class="meta" style="margin-top:-8px">Tap a task to add it to today. Tap ★ to make it one of your Top 3 (${tops.length}/3).</p>
+    ${list.map(t => { const a = area(t.areaId), on = t.day === k, star = tops.includes(t.id); return `<div class="pick ${on ? 'on' : ''}">
+      <button class="pick-main" data-a="toggle-today" data-id="${t.id}"><i class="dot" style="background:${a ? a.color : '#888'}"></i>${esc(t.title)}<span class="meta">${esc((project(t.projectId) || a || {}).name || '')}</span></button>
+      <button class="star ${star ? 'on' : ''}" data-a="toggle-top3" data-id="${t.id}" aria-label="Top 3">${star ? '★' : '☆'}</button></div>`; }).join('') || '<div class="empty">Add some tasks first with the + button.</div>'}
+    <div class="sheet-actions"><button class="btn" data-a="close-sheet">Done</button></div>`, openTodayPicker);
 }
 
 function openTop3Picker() {
@@ -1157,7 +1206,7 @@ const A = {
   'quick-add': () => {
     if (UI.view === 'ideas' && UI.studio === 'fabrics') return openFabric(null);
     if (UI.view === 'ideas') { const t = $('.capture textarea'); if (t) { t.focus(); t.scrollIntoView({ block: 'center' }); } return; }
-    openTask(null, { areaId: UI.view === 'projects' && UI.area !== 'all' ? UI.area : undefined });
+    openTask(null, UI.view === 'projects' && UI.area !== 'all' ? { areaId: UI.area, day: '' } : {});
   },
   'filter': d => { UI.area = d.id; render(); window.scrollTo(0, 0); },
   'studio': d => { UI.studio = d.m; saveUI(); render(); window.scrollTo(0, 0); },
@@ -1179,7 +1228,7 @@ const A = {
   'proj-mode': d => { UI.projMode = d.m; saveUI(); render(); },
   'new-project': d => openProject(null, d.area),
   'open-project': d => openProject(d.id),
-  'new-task': d => { const p = project(d.project); openTask(null, p ? { areaId: p.areaId, projectId: p.id } : { areaId: d.area }); },
+  'new-task': d => { const p = project(d.project); openTask(null, p ? { areaId: p.areaId, projectId: p.id, day: '' } : { areaId: d.area, day: '' }); },
   'edit-task': d => openTask(d.id),
   'toggle-task': d => {
     const t = task(d.id); if (!t) return;
@@ -1222,6 +1271,9 @@ const A = {
       moved.forEach(id => { if (!tl.includes(id) && tl.length < 3) tl.push(id); });
       S.top3[k] = (S.top3[k] || []).filter(id => !moved.includes(id));
       S.restMoved[k] = moved;
+      S.restMovedTasks = S.restMovedTasks || {};
+      S.restMovedTasks[k] = S.tasks.filter(t => t.day === k && !t.done).map(t => t.id);
+      S.restMovedTasks[k].forEach(id => { const t = task(id); t.day = tom; });
       S.blocks.forEach(b => { if (b.date === k) b.skipped = true; });
     }
     UI.deckIdx = 0; closeSheet(); commit();
@@ -1233,6 +1285,8 @@ const A = {
     S.top3[tom] = (S.top3[tom] || []).filter(id => !moved.includes(id));
     S.top3[k] = [...new Set([...(S.top3[k] || []), ...moved])].slice(0, 3);
     delete S.restMoved[k];
+    ((S.restMovedTasks || {})[k] || []).forEach(id => { const t = task(id); if (t && !t.done) t.day = k; });
+    if (S.restMovedTasks) delete S.restMovedTasks[k];
     S.blocks.forEach(b => { if (b.date === k) delete b.skipped; });
     commit();
   },
@@ -1255,9 +1309,16 @@ const A = {
   'pick-focus': () => openFocusPicker(),
   'log-time': () => openLogTime(),
   'pick-top3': () => openTop3Picker(),
+  'plan-today': () => openTodayPicker(),
+  'toggle-today': d => {
+    const t = task(d.id), k = todayKey(); if (!t) return;
+    if (t.day === k) { scheduleTask(t, ''); S.top3[k] = (S.top3[k] || []).filter(id => id !== t.id); } else scheduleTask(t, k);
+    commit(); refreshSheet();
+  },
+  'task-when': d => { const t = task(d.id); if (!t) return; scheduleTask(t, d.v === 'tomorrow' ? dkey(addDays(new Date(), 1)) : ''); if (d.v !== 'today') S.top3[todayKey()] = (S.top3[todayKey()] || []).filter(id => id !== t.id); closeSheet(); commit(); toast(d.v === 'tomorrow' ? 'Moved to tomorrow' : 'Moved off your days. It\'s still in the project.'); },
   'toggle-top3': d => {
     const k = todayKey(), l = S.top3[k] = S.top3[k] || [], i = l.indexOf(d.id);
-    if (i > -1) l.splice(i, 1); else if (l.length >= 3) return toast('Three is the limit. Unpick one first.'); else l.push(d.id);
+    if (i > -1) l.splice(i, 1); else if (l.length >= 3) return toast('Three is the limit. Unpick one first.'); else { l.push(d.id); const t = task(d.id); if (t && t.day !== k) scheduleTask(t, k); }
     commit(); refreshSheet();
   },
   'carry': () => { const c = carryOver(); S.top3[todayKey()] = c.slice(0, 3); commit(); },
@@ -1342,6 +1403,9 @@ const F = {
     if (id) { t = task(id); Object.assign(t, data); }
     else { t = { id: uid(), created: Date.now(), done: false, doneAt: null, ...data }; S.tasks.push(t); }
     const k = todayKey(), l = S.top3[k] = S.top3[k] || [], i = l.indexOf(t.id);
+    const w = f.get('when');
+    if (w !== 'later' && w !== null) scheduleTask(t, w === 'today' ? (t.day && t.day <= k ? t.day : k) : w === 'tomorrow' ? dkey(addDays(new Date(), 1)) : '');
+    if (f.get('top3') && t.day !== k) scheduleTask(t, k);
     if (f.get('top3') && i === -1) { if (l.length < 3) l.push(t.id); else toast('Top 3 is full, so the task was saved without it'); }
     if (!f.get('top3') && i > -1) l.splice(i, 1);
     if (form.dataset.idea) S.ideas = S.ideas.filter(x => x.id !== form.dataset.idea);
@@ -1367,9 +1431,16 @@ const F = {
   },
   'inline-task'(f, form) {
     const p = project(form.dataset.project);
-    S.tasks.push({ id: uid(), created: Date.now(), done: false, doneAt: null, title: f.get('title').trim(), areaId: p.areaId, projectId: p.id, due: '', est: '', priority: 'normal', notes: '', energy: '' });
+    S.tasks.push({ id: uid(), created: Date.now(), done: false, doneAt: null, title: f.get('title').trim(), areaId: p.areaId, projectId: p.id, due: '', est: '', priority: 'normal', notes: '', energy: '', day: '' });
     touchProject(p.id); commit(); refreshSheet();
     setTimeout(() => { const i = $('form[data-form="inline-task"] input'); if (i) i.focus(); }, 30);
+  },
+  'today-add'(f) {
+    const title = (f.get('title') || '').trim(); if (!title) return;
+    const b = currentBlock(S.blocks.filter(x => x.date === todayKey() && !x.skipped).sort((a, c) => a.start.localeCompare(c.start)));
+    const t = { id: uid(), created: Date.now(), done: false, doneAt: null, title, areaId: b ? b.areaId : S.areas[0].id, projectId: b ? b.projectId : null, due: '', est: '', priority: 'normal', notes: '', energy: '' };
+    scheduleTask(t, todayKey()); S.tasks.push(t); commit();
+    setTimeout(() => { const i = $('.today-add input'); if (i) i.focus(); }, 30);
   },
   person(f, form) {
     const id = form.dataset.id;
@@ -1483,6 +1554,7 @@ function render() {
   $('#main').innerHTML = views[UI.view]();
   if (draft && $('.capture textarea') && document.activeElement !== $('.capture textarea')) $('.capture textarea').value = draft;
   document.querySelectorAll('.tab').forEach(t => t.classList.toggle('on', t.dataset.v === (UI.view === 'review' ? 'week' : UI.view)));
+  $('.fab').hidden = UI.view === 'tonight'; // Tonight has its own add field on the Today card
   hydrateImages();
   const deck = $('[data-deck]');
   if (deck && deckPos) deck.scrollLeft = deckPos;
@@ -1560,6 +1632,8 @@ function toast(msg) {
   toastTimer = setTimeout(() => { el.hidden = true; }, 3000);
 }
 
+let lastDay = todayKey();
+setInterval(() => { if (todayKey() !== lastDay) { lastDay = todayKey(); rollover(); commit(); } }, 60000);
 setInterval(() => {
   if (S.timer) document.querySelectorAll('[data-elapsed]').forEach(el => { el.textContent = fmtClock(Date.now() - S.timer.start); });
 }, 1000);
@@ -1567,11 +1641,13 @@ setInterval(() => {
 document.addEventListener('visibilitychange', () => {
   if (document.hidden) return;
   S = load();
+  rollover(); save();
   if ($('#sheet').hidden) render();
   pullEvents(); schedulePush();
 });
 
 applyTheme();
+rollover(); save();
 render();
 pullEvents(); schedulePush();
 setTimeout(cleanupPhotos, 4000);
